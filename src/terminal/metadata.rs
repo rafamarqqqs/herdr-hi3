@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_title_takes_pane_border_priority() {
+    fn explicit_pane_name_survives_metadata_title_updates() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
         terminal.set_manual_label("manual".into());
@@ -667,11 +667,14 @@ mod tests {
             seq: None,
         });
 
+        assert_eq!(terminal.border_label(false).as_deref(), Some("manual"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("manual"));
+        terminal.clear_manual_label();
         assert_eq!(
             terminal.border_label(false).as_deref(),
             Some("Prompt title")
         );
-        assert_eq!(terminal.border_label(true).as_deref(), Some("Prompt title"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
     }
 
     #[test]
@@ -881,11 +884,12 @@ mod tests {
         });
 
         assert_eq!(terminal.next_agent_metadata_expiry(), Some(old_deadline));
-        assert_eq!(
-            terminal.effective_presentation().title.as_deref(),
-            Some("Prompt title")
+        let presentation = terminal.effective_presentation_for_state_at(
+            terminal.state,
+            old_deadline - Duration::from_millis(1),
         );
-        assert_eq!(terminal.effective_presentation().display_agent, None);
+        assert_eq!(presentation.title.as_deref(), Some("Prompt title"));
+        assert_eq!(presentation.display_agent, None);
 
         let mutation = terminal
             .expire_agent_metadata_at(old_deadline, old_deadline)

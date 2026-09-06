@@ -39,9 +39,13 @@ pub(super) const SLEEP_PHRASES: &[&str] = &[
 
 impl ClientShellState {
     pub(super) fn begin_sleep(&mut self, now: Instant) {
-        if self.config.top_padding == 0 || self.snapshot.is_none() {
+        if self.config.top_padding == 0
+            || self.snapshot.is_none()
+            || !self.endpoint_is_online(&self.active_endpoint_id)
+        {
             return;
         }
+        self.sleep_server = self.active_endpoint_label().to_owned();
         self.sleep_started = Some(now);
         // Randomized once per opening, never during rendering or countdown ticks.
         let choice = std::collections::hash_map::RandomState::new().hash_one(now);
@@ -55,6 +59,13 @@ impl ClientShellState {
     }
 
     pub(crate) fn tick_sleep(&mut self, now: Instant) -> ClientShellInput {
+        if !self.endpoint_is_online(&self.active_endpoint_id) {
+            let repaint = self.sleep_started.take().is_some();
+            return ClientShellInput {
+                repaint,
+                ..ClientShellInput::default()
+            };
+        }
         let Some(started) = self.sleep_started else {
             return ClientShellInput::default();
         };

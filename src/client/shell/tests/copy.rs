@@ -199,6 +199,16 @@ fn retained_mouse_selection_copies_only_on_exact_copy_shortcut() {
         .as_ref()
         .is_some_and(crate::selection::Selection::is_finalized));
 
+    // Agent output outside the selected text must not cancel a pending copy.
+    let mut updated = state.pane_surface.clone().expect("pane surface");
+    updated.panes[0].content_revision = 2;
+    updated.frame.cells[4].symbol = "-".into();
+    state.set_pane_surface(updated);
+    assert!(state
+        .selection
+        .as_ref()
+        .is_some_and(crate::selection::Selection::is_finalized));
+
     let copy = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         KeyCode::Char('c'),
         KeyModifiers::CONTROL,
@@ -214,7 +224,7 @@ fn retained_mouse_selection_copies_only_on_exact_copy_shortcut() {
         ClientShellAction::Endpoint { request, .. } => request.id.clone(),
         _ => unreachable!(),
     };
-    let (_, fallback) = state.handle_endpoint_result(
+    let (_, actions) = state.handle_endpoint_result(
         "boot-1",
         &request_id,
         Ok(crate::api::schema::ResponseResult::PaneSelection {
@@ -222,25 +232,10 @@ fn retained_mouse_selection_copies_only_on_exact_copy_shortcut() {
             text: String::new(),
         }),
     );
-    assert!(matches!(
-        &fallback[..],
-        [ClientShellAction::Request(ClientMessage::ClientShellPaneInput {
-            pane_id,
-            events,
-        })] if pane_id == "pane_1"
-            && matches!(
-                &events[..],
-                [ClientPaneInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Char('c'),
-                    kind: crate::protocol::ClientKeyKind::Press,
-                    ..
-                }, ClientPaneInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Char('c'),
-                    kind: crate::protocol::ClientKeyKind::Release,
-                    ..
-                }]
-            )
-    ));
+    assert!(
+        actions.is_empty(),
+        "failed copy must not send terminal input"
+    );
 }
 
 #[test]
@@ -756,22 +751,22 @@ fn navigator_owns_search_mouse_selection_and_stable_target_focus() {
     state.handle_input_bytes(b"\x1b");
     state.handle_input_bytes(b"a");
     state.compose(106, 30).expect("navigator rows");
-    let pane_index = {
-        let snapshot = state.snapshot.as_deref().expect("snapshot");
+    let pane_target = {
         let ClientShellOverlay::Navigator(navigator) = state.overlay.as_ref().expect("navigator")
         else {
             panic!("expected navigator");
         };
-        render::client_navigator_rows(snapshot, navigator)
+        render::client_navigator_rows(&state.endpoints, &state.active_endpoint_id, navigator)
             .iter()
-            .position(|row| matches!(row.target, ClientNavigatorTarget::Pane(_)))
+            .find(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+            .map(|row| row.target.clone())
             .expect("pane row")
     };
     let pane_rect = state
         .hits
         .navigator_rows
         .iter()
-        .find(|(_, index)| *index == pane_index)
+        .find(|(_, target)| *target == pane_target)
         .map(|(rect, _)| *rect)
         .expect("visible pane row");
     let select =

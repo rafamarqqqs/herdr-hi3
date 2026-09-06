@@ -5,23 +5,6 @@ const SELECTION_AUTOSCROLL_INTERVAL: std::time::Duration = std::time::Duration::
 const DRAG_TAB_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl ClientShellState {
-    fn workspace_is_draggable(&self, workspace_id: &str) -> bool {
-        self.snapshot
-            .as_deref()
-            .and_then(|snapshot| {
-                snapshot
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.workspace_id == workspace_id)
-            })
-            .is_some_and(|workspace| {
-                !workspace
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|worktree| worktree.is_linked_worktree)
-            })
-    }
-
     fn point_over_mouse_button(&self, point: (u16, u16)) -> bool {
         let over_rows =
             |rows: &[(Rect, usize)]| rows.iter().any(|(rect, _)| super::contains(*rect, point));
@@ -38,7 +21,11 @@ impl ClientShellState {
                         || super::contains(self.hits.overlay_clear, point)
                 }
                 ClientShellOverlay::Help(_) => super::contains(self.hits.overlay_cancel, point),
-                ClientShellOverlay::Navigator(_) => over_rows(&self.hits.navigator_rows),
+                ClientShellOverlay::Navigator(_) => self
+                    .hits
+                    .navigator_rows
+                    .iter()
+                    .any(|(rect, _)| super::contains(*rect, point)),
                 ClientShellOverlay::WorktreeCreate(_)
                 | ClientShellOverlay::WorktreeOpen(_)
                 | ClientShellOverlay::WorktreeRemove(_) => {
@@ -87,6 +74,16 @@ impl ClientShellState {
         .any(|rect| super::contains(rect, point));
         notification_clickable
             || over_chrome_button
+            || self
+                .hits
+                .machines
+                .iter()
+                .any(|hit| super::contains(hit.rect, point))
+            || self
+                .hits
+                .endpoint_agents
+                .iter()
+                .any(|(rect, _, _)| super::contains(*rect, point))
             || self.pane_label_at(point).is_some()
             || self
                 .hits
@@ -155,6 +152,9 @@ impl ClientShellState {
                 .iter()
                 .enumerate()
                 .find(|(index, hit)| {
+                    if hit.endpoint_id != self.active_endpoint_id {
+                        return false;
+                    }
                     let bottom = self
                         .hits
                         .workspaces
@@ -194,7 +194,17 @@ impl ClientShellState {
                         point,
                     )
                 })
-                .map(|(_, (_, pane_id))| pane_id.clone());
+                .map(|(_, (_, pane_id))| pane_id.clone())
+                .or_else(|| {
+                    self.hits
+                        .endpoint_agents
+                        .iter()
+                        .find_map(|(rect, endpoint_id, pane_id)| {
+                            (endpoint_id == &self.active_endpoint_id
+                                && super::contains(*rect, point))
+                            .then(|| pane_id.clone())
+                        })
+                });
             let group = self
                 .hits
                 .agent_groups
@@ -998,6 +1008,9 @@ impl ClientShellState {
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
             || point.1 >= self.hits.workspace_body.bottom()
+            || self.hits.workspaces.iter().any(|hit| {
+                hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
+            })
         {
             return None;
         }
@@ -1005,12 +1018,17 @@ impl ClientShellState {
             .hits
             .workspaces
             .iter()
-            .filter(|hit| !hit.indented)
+            .filter(|hit| hit.endpoint_id == self.active_endpoint_id && !hit.indented)
             .map(|hit| (Some(hit.workspace_id.clone()), hit.rect.y.saturating_sub(1)))
             .collect::<Vec<_>>();
         let snapshot = self.snapshot.as_deref()?;
         let entries = render::workspace_entries(snapshot, &self.collapsed_groups);
-        let last_hit = self.hits.workspaces.last()?;
+        let last_hit = self
+            .hits
+            .workspaces
+            .iter()
+            .rev()
+            .find(|hit| hit.endpoint_id == self.active_endpoint_id)?;
         let last_position = entries.iter().position(|entry| {
             snapshot
                 .workspaces
@@ -1679,7 +1697,7 @@ impl ClientShellState {
                     .max(mouse.row.abs_diff(press.start_row));
                 if delta >= 1 {
                     let source_workspace_id = press.workspace_id.clone();
-                    let draggable = self.workspace_is_draggable(&source_workspace_id);
+                    let draggable = self.endpoint_workspace_is_draggable(press);
                     if draggable {
                         if let Some(target) = self.workspace_drop_target_at(point) {
                             self.chrome_drag = Some(ClientChromeDrag::Workspace {
@@ -2010,14 +2028,7 @@ impl ClientShellState {
                 return;
             }
             if let Some(press) = self.workspace_press.take() {
-                self.push_endpoint_method(
-                    crate::api::schema::Method::WorkspaceFocus(
-                        crate::api::schema::WorkspaceTarget {
-                            workspace_id: press.workspace_id,
-                        },
-                    ),
-                    outcome,
-                );
+                self.finish_endpoint_workspace_press(press, outcome);
                 return;
             }
             if let Some(press) = self.tab_press.take() {
@@ -2319,14 +2330,14 @@ impl ClientShellState {
                 .navigator_rows
                 .iter()
                 .find(|(rect, _)| super::contains(*rect, point))
-                .copied();
+                .cloned();
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some((_, index)) = row_hit {
+                    if let Some((_, target)) = row_hit {
                         if let Some(ClientShellOverlay::Navigator(navigator)) =
                             self.overlay.as_mut()
                         {
-                            navigator.selected = index;
+                            navigator.selected = Some(target);
                         }
                         outcome.repaint = true;
                     }
@@ -2340,30 +2351,13 @@ impl ClientShellState {
                             navigator.filter = None;
                         }
                         outcome.repaint = true;
-                    } else if let Some((rect, index)) = row_hit {
+                    } else if let Some((rect, target)) = row_hit {
                         if let Some(ClientShellOverlay::Navigator(navigator)) =
                             self.overlay.as_mut()
                         {
-                            navigator.selected = index;
+                            navigator.selected = Some(target.clone());
                         }
-                        let workspace = self
-                            .snapshot
-                            .as_deref()
-                            .zip(self.overlay.as_ref())
-                            .and_then(|(snapshot, overlay)| match overlay {
-                                ClientShellOverlay::Navigator(navigator) => {
-                                    render::client_navigator_rows(snapshot, navigator)
-                                        .get(index)
-                                        .map(|row| {
-                                            matches!(
-                                                row.target,
-                                                ClientNavigatorTarget::Workspace(_)
-                                            )
-                                        })
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(false);
+                        let workspace = matches!(target, ClientNavigatorTarget::Workspace { .. });
                         if workspace && mouse.column <= rect.x.saturating_add(3) {
                             self.toggle_selected_navigator_workspace();
                             outcome.repaint = true;
@@ -2516,13 +2510,7 @@ impl ClientShellState {
                     return;
                 }
                 let workspace_id = (!self.sidebar_collapsed)
-                    .then(|| {
-                        self.hits
-                            .workspaces
-                            .iter()
-                            .find(|hit| super::contains(hit.rect, point))
-                            .map(|hit| hit.workspace_id.clone())
-                    })
+                    .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
                 if let Some(workspace_id) = workspace_id {
                     self.open_workspace_context_menu(workspace_id, mouse.column, mouse.row);
@@ -2733,6 +2721,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if self.handle_endpoint_machine_click(point, outcome) {
+                    return;
+                }
                 if super::contains(self.hits.global_launcher, point) {
                     self.toggle_global_menu();
                     outcome.repaint = true;
@@ -2748,7 +2739,20 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.explorer_button, point) {
-                    outcome.actions.push(ClientShellAction::OpenExplorer);
+                    if self.active_endpoint_id.is_local() {
+                        outcome.actions.push(ClientShellAction::OpenExplorer);
+                    } else {
+                        self.push_endpoint_method(
+                            crate::api::schema::Method::PluginActionInvoke(
+                                crate::api::schema::PluginActionInvokeParams {
+                                    action_id: "herdr-sidebar.open-sidebar".into(),
+                                    plugin_id: None,
+                                    context: None,
+                                },
+                            ),
+                            outcome,
+                        );
+                    }
                     return;
                 }
                 if super::contains(self.hits.new_tab, point) {
@@ -2816,6 +2820,7 @@ impl ClientShellState {
                     .iter()
                     .find(|hit| super::contains(hit.rect, point))
                     .map(|hit| ClientWorkspacePress {
+                        endpoint_id: hit.endpoint_id.clone(),
                         workspace_id: hit.workspace_id.clone(),
                         start_column: mouse.column,
                         start_row: mouse.row,
@@ -2860,6 +2865,9 @@ impl ClientShellState {
                         );
                     }
                     self.tab_press = Some(tab_press);
+                    return;
+                }
+                if self.handle_endpoint_agent_click(point, outcome) {
                     return;
                 }
                 let agent_pane_id = self

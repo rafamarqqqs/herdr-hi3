@@ -4,7 +4,9 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
+pub(in crate::client::shell) fn collapsed_sidebar_sections(
+    area: Rect,
+) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.is_empty() {
         return (Rect::default(), None, Rect::default());
@@ -92,6 +94,7 @@ pub(crate) fn render_collapsed_sidebar(
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
+            endpoint_id: ClientEndpointId::Local,
             workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
@@ -259,57 +262,7 @@ pub(crate) fn render_sidebar(
             );
         }
         if config.top_padding > 0 {
-            // App-only activity bar: three evenly spaced actions.
-            let button_width = workspace_area.width.saturating_sub(4) / 3;
-            let gap = 1u16;
-            let total_width = (button_width * 3).saturating_add(gap * 2);
-            let margin = workspace_area.width.saturating_sub(total_width) / 2;
-            let button_x = workspace_area.x.saturating_add(margin);
-            put_text(
-                buffer,
-                workspace_area.x,
-                workspace_area.y,
-                workspace_area.width,
-                &" ".repeat(workspace_area.width as usize),
-                Style::default().bg(palette.sidebar_bg),
-            );
-            hits.global_launcher = Rect::new(button_x, workspace_area.y, button_width, 1);
-            hits.new_workspace = Rect::new(
-                button_x.saturating_add(button_width + gap),
-                workspace_area.y,
-                button_width,
-                1,
-            );
-            hits.explorer_button = Rect::new(
-                button_x.saturating_add((button_width + gap) * 2),
-                workspace_area.y,
-                button_width,
-                1,
-            );
-            put_text(
-                buffer,
-                hits.global_launcher.x + button_width.saturating_sub(4) / 2,
-                workspace_area.y,
-                button_width,
-                "menu",
-                Style::default().fg(palette.overlay0),
-            );
-            put_text(
-                buffer,
-                hits.new_workspace.x + button_width.saturating_sub(3) / 2,
-                workspace_area.y,
-                button_width,
-                "new",
-                Style::default().fg(palette.overlay0),
-            );
-            put_text(
-                buffer,
-                hits.explorer_button.x + button_width.saturating_sub(8) / 2,
-                workspace_area.y,
-                hits.explorer_button.width,
-                "explorer",
-                Style::default().fg(palette.overlay0),
-            );
+            render_app_toolbar(buffer, workspace_area, config, hits);
         }
     }
     if workspace_area.height > 1 {
@@ -464,6 +417,7 @@ pub(crate) fn render_sidebar(
             config.status_indicators,
             entry,
             rows,
+            true,
             selected,
             dragged,
             palette,
@@ -486,6 +440,7 @@ pub(crate) fn render_sidebar(
         });
         hits.workspaces.push(WorkspaceHit {
             rect,
+            endpoint_id: ClientEndpointId::Local,
             workspace_id: workspace.workspace_id.clone(),
             indented: entry.indented,
             group_toggle,
@@ -541,17 +496,6 @@ pub(crate) fn render_sidebar(
             "«",
             Style::default().fg(palette.overlay0),
         );
-    }
-}
-
-pub(crate) fn render_sidebar_background(buffer: &mut Buffer, area: Rect, palette: &Palette) {
-    buffer.set_style(area, Style::default().bg(palette.sidebar_bg));
-    let separator_x = area.right().saturating_sub(1);
-    for y in area.y..area.bottom() {
-        if let Some(cell) = buffer.cell_mut((separator_x, y)) {
-            cell.set_symbol("│");
-            cell.set_style(Style::default().fg(palette.surface_dim));
-        }
     }
 }
 
@@ -644,7 +588,7 @@ pub(crate) fn workspace_entries(
     entries
 }
 
-fn parent_group_key(snapshot: &ClientShellSnapshot, index: usize) -> Option<String> {
+pub(super) fn parent_group_key(snapshot: &ClientShellSnapshot, index: usize) -> Option<String> {
     let workspace = snapshot.workspaces.get(index)?;
     let worktree = workspace.worktree.as_ref()?;
     if worktree.is_linked_worktree {
@@ -664,7 +608,7 @@ fn parent_group_key(snapshot: &ClientShellSnapshot, index: usize) -> Option<Stri
         .then(|| worktree.key.clone())
 }
 
-fn displayed_workspace_status(
+pub(super) fn displayed_workspace_status(
     snapshot: &ClientShellSnapshot,
     workspace: &ClientShellWorkspace,
     collapsed_groups: &HashSet<String>,
@@ -693,7 +637,7 @@ fn displayed_workspace_status(
         .unwrap_or(workspace.agent_status)
 }
 
-fn workspace_rows(
+pub(in crate::client::shell) fn workspace_rows(
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indented: bool,
@@ -722,7 +666,7 @@ fn workspace_rows(
     )
 }
 
-fn render_workspace_rows(
+pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
     workspace: &ClientShellWorkspace,
@@ -730,6 +674,7 @@ fn render_workspace_rows(
     indicators: crate::config::StatusIndicatorStyle,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    endpoint_active: bool,
     selected: bool,
     dragged: bool,
     palette: &Palette,
@@ -765,7 +710,7 @@ fn render_workspace_rows(
         } else {
             x = x.saturating_add(3);
         }
-        let highlighted = workspace.focused || dragged;
+        let highlighted = endpoint_active && workspace.focused || dragged;
         let workspace_style = Style::default()
             .fg(if highlighted {
                 palette.text
@@ -777,7 +722,7 @@ fn render_workspace_rows(
             } else {
                 Modifier::empty()
             });
-        let secondary_style = Style::default().fg(if workspace.focused {
+        let secondary_style = Style::default().fg(if endpoint_active && workspace.focused {
             palette.mauve
         } else {
             palette.overlay0
@@ -807,7 +752,7 @@ fn render_workspace_rows(
         Some(palette.selection_bg)
     } else if dragged {
         Some(palette.surface1)
-    } else if workspace.focused {
+    } else if endpoint_active && workspace.focused {
         Some(palette.active_row_bg)
     } else {
         None
@@ -819,4 +764,64 @@ fn render_workspace_rows(
             }
         }
     }
+}
+
+pub(in crate::client::shell) fn render_app_toolbar(
+    buffer: &mut Buffer,
+    workspace_area: Rect,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    // App-only activity bar: three evenly spaced actions.
+    let button_width = workspace_area.width.saturating_sub(4) / 3;
+    let gap = 1u16;
+    let total_width = (button_width * 3).saturating_add(gap * 2);
+    let margin = workspace_area.width.saturating_sub(total_width) / 2;
+    let button_x = workspace_area.x.saturating_add(margin);
+    put_text(
+        buffer,
+        workspace_area.x,
+        workspace_area.y,
+        workspace_area.width,
+        &" ".repeat(workspace_area.width as usize),
+        Style::default().bg(palette.sidebar_bg),
+    );
+    hits.global_launcher = Rect::new(button_x, workspace_area.y, button_width, 1);
+    hits.new_workspace = Rect::new(
+        button_x.saturating_add(button_width + gap),
+        workspace_area.y,
+        button_width,
+        1,
+    );
+    hits.explorer_button = Rect::new(
+        button_x.saturating_add((button_width + gap) * 2),
+        workspace_area.y,
+        button_width,
+        1,
+    );
+    put_text(
+        buffer,
+        hits.global_launcher.x + button_width.saturating_sub(4) / 2,
+        workspace_area.y,
+        button_width,
+        "menu",
+        Style::default().fg(palette.overlay0),
+    );
+    put_text(
+        buffer,
+        hits.new_workspace.x + button_width.saturating_sub(3) / 2,
+        workspace_area.y,
+        button_width,
+        "new",
+        Style::default().fg(palette.overlay0),
+    );
+    put_text(
+        buffer,
+        hits.explorer_button.x + button_width.saturating_sub(8) / 2,
+        workspace_area.y,
+        hits.explorer_button.width,
+        "explorer",
+        Style::default().fg(palette.overlay0),
+    );
 }

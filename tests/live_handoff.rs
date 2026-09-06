@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 pub mod support;
 
 use std::fs;
@@ -893,7 +895,6 @@ fn live_handoff_preserves_pane_process_io() {
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
-    drop(spawned);
     assert!(
         wait_for_message_variant(
             &mut client_stream,
@@ -903,6 +904,10 @@ fn live_handoff_preserves_pane_process_io() {
         .unwrap(),
         "connected client shell should receive live-handoff shutdown"
     );
+    // Dropping this guard kills the old server. Let it send its final client
+    // notification first, rather than racing the graceful shutdown after the
+    // successful API response.
+    drop(spawned);
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
@@ -1264,10 +1269,13 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     let started_marker = base.join("agent-started");
     let fake_pi = base.join("pi");
     fs::create_dir_all(&base).unwrap();
+    // Keep the named script in the process tree. macOS does not expose the
+    // environment of the system sleep binary through KERN_PROCARGS2, so
+    // replacing the script with sleep would erase this fake agent's identity.
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\nexec /bin/sleep 30\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n",
             started_marker.display()
         ),
     )

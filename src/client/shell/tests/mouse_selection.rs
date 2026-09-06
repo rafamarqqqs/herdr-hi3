@@ -154,7 +154,6 @@ fn sleep_is_app_only_and_detaches_without_closing_server_work() {
     state.begin_sleep(now);
     assert!(state.sleep_started.is_none());
     state.config.top_padding = 1;
-    state.sleep_server = "test-host (local server)".into();
     for collapsed in [false, true] {
         state.sidebar_collapsed = collapsed;
         state.compose(100, 32).expect("app frame");
@@ -223,16 +222,16 @@ fn sleep_is_app_only_and_detaches_without_closing_server_work() {
             .count(),
         1
     );
-    assert!(text.contains("test-host (local server)"));
+    assert!(text.contains(state.active_endpoint_label()));
     assert_eq!(state.sleep_phrase, phrase);
     assert!(text.contains(phrase));
     let server_row = rows
         .iter()
-        .find(|row| row.contains("test-host (local server)"))
+        .find(|row| row.contains(state.active_endpoint_label()))
         .expect("server row");
     assert_eq!(
         server_row
-            .split("test-host")
+            .split(state.active_endpoint_label())
             .next()
             .expect("prefix")
             .chars()

@@ -444,9 +444,15 @@ pub fn wait_for_message_variants(
     timeout: Duration,
     variants: &[u32],
 ) -> Result<bool, String> {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .map_err(|e| e.to_string())?;
+    let read_timeout = Some(Duration::from_millis(200));
+    // Darwin rejects SO_RCVTIMEO changes after the peer shuts down, even
+    // while its final message remains buffered. Reuse the bounded timeout
+    // established by an earlier wait instead of setting it redundantly.
+    if stream.read_timeout().map_err(|e| e.to_string())? != read_timeout {
+        stream
+            .set_read_timeout(read_timeout)
+            .map_err(|e| e.to_string())?;
+    }
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match read_server_message(stream) {
@@ -841,6 +847,31 @@ fn process_exists(pid: libc::pid_t) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_wait_reads_buffered_shutdown_with_existing_timeout() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        writer
+            .write_all(&frame_message(&encode_varint_u32(
+                SERVER_MESSAGE_SERVER_SHUTDOWN,
+            )))
+            .unwrap();
+        writer.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(writer);
+        assert!(wait_for_message_variant(
+            &mut reader,
+            Duration::from_secs(1),
+            SERVER_MESSAGE_SERVER_SHUTDOWN
+        )
+        .unwrap());
+        assert_eq!(
+            reader.read_timeout().unwrap(),
+            Some(Duration::from_millis(200))
+        );
+    }
 
     fn unique_missing_runtime_dir(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()

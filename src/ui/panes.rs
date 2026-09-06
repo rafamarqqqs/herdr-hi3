@@ -10,6 +10,7 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 #[cfg(test)]
 use super::text::display_width;
 use super::text::truncate_end;
+use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::AppState;
 use crate::layout::PaneInfo;
@@ -707,12 +708,29 @@ pub(crate) fn render_selection_highlight<P: PartialEq>(
         return;
     };
     let bg = automatic_selection_bg(p, host_theme);
+    let bg_luminance = match bg {
+        Color::Rgb(r, g, b) => Some(relative_luminance((r, g, b))),
+        _ => None,
+    };
+    let fallback_fg = selection_fg_for_bg(bg, p);
     for y in 0..inner.height {
         for x in 0..inner.width {
             if selection.contains(y, x, scroll_metrics) {
-                // Change only the background so selection never destroys the
-                // terminal's foreground colors or text attributes.
-                buffer[(inner.x + x, inner.y + y)].set_bg(bg);
+                let cell = &mut buffer[(inner.x + x, inner.y + y)];
+                // Preserve syntax colors when readable, but do not retain a
+                // foreground that disappears against the selection tint.
+                let fg = match cell.fg {
+                    Color::Rgb(r, g, b) => Some((r, g, b)),
+                    Color::Reset => host_theme.foreground.map(terminal_theme_to_rgb),
+                    _ => None,
+                };
+                if let (Some(fg), Some(b)) = (fg, bg_luminance) {
+                    let a = relative_luminance(fg);
+                    if (a.max(b) + 0.05) / (a.min(b) + 0.05) < 3.0 {
+                        cell.set_fg(fallback_fg);
+                    }
+                }
+                cell.set_bg(bg);
             }
         }
     }
@@ -721,8 +739,16 @@ pub(crate) fn render_selection_highlight<P: PartialEq>(
 type Rgb = (u8, u8, u8);
 
 fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::TerminalTheme) -> Color {
-    let Some(background) = host_theme.background.map(terminal_theme_to_rgb) else {
-        return selection_palette_background(p);
+    let fallback = selection_palette_background(p);
+    let Some(background) = host_theme
+        .background
+        .map(|color| (color.r, color.g, color.b))
+        .or(match fallback {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            _ => None,
+        })
+    else {
+        return fallback;
     };
 
     let target = if relative_luminance(background) < 0.5 {
@@ -753,6 +779,21 @@ fn selection_palette_background(p: &Palette) -> Color {
 
 fn terminal_theme_to_rgb(color: crate::terminal_theme::RgbColor) -> Rgb {
     (color.r, color.g, color.b)
+}
+
+fn selection_fg_for_bg(bg: Color, p: &Palette) -> Color {
+    if let Color::Rgb(r, g, b) = bg {
+        let luminance = relative_luminance((r, g, b));
+        let black_contrast = (luminance + 0.05) / 0.05;
+        let white_contrast = 1.05 / (luminance + 0.05);
+        return if black_contrast > white_contrast {
+            Color::Rgb(0, 0, 0)
+        } else {
+            Color::Rgb(255, 255, 255)
+        };
+    }
+
+    panel_contrast_fg(p)
 }
 
 fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
@@ -1380,5 +1421,72 @@ mod tests {
             panic!("selection background should resolve to rgb");
         };
         assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
+    }
+
+    #[test]
+    fn selection_replaces_low_contrast_foreground_but_keeps_soft_tint() {
+        let palette = Palette::catppuccin();
+        let bg = automatic_selection_bg(&palette, Default::default());
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buffer[(0, 0)].set_symbol("x").set_fg(bg);
+        let selection = Selection::absolute_range(PaneId::from_raw(1), (0, 0), (0, 0));
+        render_selection_highlight(
+            Some(&selection),
+            &mut buffer,
+            &PaneId::from_raw(1),
+            Rect::new(0, 0, 1, 1),
+            None,
+            &palette,
+            Default::default(),
+        );
+        assert_eq!(buffer[(0, 0)].bg, bg);
+        assert_eq!(buffer[(0, 0)].fg, selection_fg_for_bg(bg, &palette));
+        assert_eq!(buffer[(0, 0)].symbol(), "x");
+    }
+
+    #[test]
+    fn automatic_selection_tint_is_soft_and_fallback_is_readable() {
+        for background in [(239, 241, 245), (26, 27, 38), (45, 53, 59)] {
+            let mut palette = Palette::catppuccin();
+            let (r, g, b) = background;
+            palette.panel_bg = Color::Rgb(r, g, b);
+            let bg = automatic_selection_bg(&palette, Default::default());
+            assert_eq!(
+                bg,
+                automatic_selection_bg(
+                    &Palette::terminal(),
+                    crate::terminal_theme::TerminalTheme {
+                        background: Some(crate::terminal_theme::RgbColor { r, g, b }),
+                        ..Default::default()
+                    }
+                )
+            );
+            let Color::Rgb(r, g, b) = bg else {
+                panic!("RGB tint expected")
+            };
+            let Color::Rgb(fr, fg, fb) = selection_fg_for_bg(bg, &palette) else {
+                panic!("RGB fallback expected")
+            };
+            let a = relative_luminance((r, g, b));
+            let b = relative_luminance((fr, fg, fb));
+            assert!((a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn automatic_selection_preserves_symbolic_palette_fallbacks() {
+        let mut palette = Palette::terminal();
+        for fallback in [Color::Blue, Color::White, Color::Indexed(42)] {
+            palette.selection_bg = fallback;
+            assert_eq!(
+                automatic_selection_bg(&palette, Default::default()),
+                fallback
+            );
+        }
+        palette.selection_bg = Color::Reset;
+        assert_eq!(
+            automatic_selection_bg(&palette, Default::default()),
+            palette.surface1
+        );
     }
 }

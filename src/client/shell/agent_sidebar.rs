@@ -10,15 +10,15 @@ use ratatui::{
 
 use super::*;
 
-struct AgentRow {
-    target: AgentRowTarget,
-    status: crate::api::schema::AgentStatus,
-    focused: bool,
-    rows: Vec<Vec<crate::ui::ResolvedToken>>,
+pub(super) struct AgentRow {
+    pub(super) target: AgentRowTarget,
+    pub(super) status: crate::api::schema::AgentStatus,
+    pub(super) focused: bool,
+    pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
     tree: Option<AgentTreeLine>,
 }
 
-enum AgentRowTarget {
+pub(super) enum AgentRowTarget {
     Pane(String),
     Group(String),
 }
@@ -42,9 +42,7 @@ pub(super) fn ordered_agent_pane_ids(
                 snapshot
                     .agents
                     .iter()
-                    .any(|agent| {
-                        agent.pane_id == pane_id.as_str() && is_real_agent(agent)
-                    })
+                    .any(|agent| agent.pane_id == pane_id.as_str() && is_real_agent(agent))
             })
             .cloned()
             .collect();
@@ -77,8 +75,64 @@ pub(super) fn render_agent_panel(
     collapsed_groups: &HashSet<String>,
     hits: &mut ShellHitMap,
 ) {
-    if area.height == 0 {
+    if !render_agent_panel_header(
+        buffer,
+        area,
+        snapshot.agent_view_label.as_deref(),
+        config,
+        hits,
+    ) {
         return;
+    }
+
+    let rows = if config.agent_panel_sort == crate::config::AgentPanelSortConfig::Tree
+        && snapshot.agent_view_label.is_none()
+    {
+        tree_agent_rows(snapshot, collapsed_groups)
+    } else {
+        agent_rows(snapshot, config, None)
+    };
+    render_agent_list(
+        buffer,
+        area,
+        &rows,
+        snapshot
+            .agent_view_label
+            .as_ref()
+            .map(|_| " no matching agents"),
+        config,
+        agent_scroll,
+        hits,
+        |row| {
+            if row.tree.is_some() {
+                1
+            } else {
+                row.rows.len()
+            }
+        },
+        |buffer, rect, row, hits| {
+            match &row.target {
+                AgentRowTarget::Pane(pane_id) => hits.agents.push((rect, pane_id.clone())),
+                AgentRowTarget::Group(key) => hits.agent_groups.push(AgentGroupHit {
+                    rect,
+                    key: key.clone(),
+                    focused: row.focused,
+                }),
+            }
+            render_agent_row(buffer, rect, row, config);
+        },
+    );
+}
+
+pub(super) fn render_agent_panel_header(
+    buffer: &mut Buffer,
+    area: Rect,
+    agent_view_label: Option<&str>,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) -> bool {
+    if area.height == 0 {
+        return false;
     }
     put_text(
         buffer,
@@ -89,7 +143,7 @@ pub(super) fn render_agent_panel(
         Style::default().fg(config.palette.surface_dim),
     );
     if area.height < 2 {
-        return;
+        return false;
     }
     put_text(
         buffer,
@@ -101,15 +155,11 @@ pub(super) fn render_agent_panel(
             .fg(config.palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
-    let sort_label =
-        snapshot
-            .agent_view_label
-            .as_deref()
-            .unwrap_or(match config.agent_panel_sort {
-                crate::config::AgentPanelSortConfig::Spaces => "grouped",
-                crate::config::AgentPanelSortConfig::Priority => "priority",
-                crate::config::AgentPanelSortConfig::Tree => "tree",
-            });
+    let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
+        crate::config::AgentPanelSortConfig::Spaces => "grouped",
+        crate::config::AgentPanelSortConfig::Priority => "priority",
+        crate::config::AgentPanelSortConfig::Tree => "tree",
+    });
     let sort_label = sort_label.to_owned();
     let sort_width = display_width(&sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
@@ -118,7 +168,7 @@ pub(super) fn render_agent_panel(
         sort_width,
         1,
     );
-    hits.agent_sort_toggle = if config.mouse_capture && snapshot.agent_view_label.is_none() {
+    hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
         sort_rect
     } else {
         Rect::default()
@@ -130,15 +180,27 @@ pub(super) fn render_agent_panel(
         sort_rect.width,
         &sort_label,
         Style::default()
-            .fg(if snapshot.agent_view_label.is_some() {
+            .fg(if agent_view_label.is_some() {
                 config.palette.accent
             } else {
                 config.palette.overlay0
             })
             .add_modifier(Modifier::BOLD),
     );
+    true
+}
 
-    let rows = agent_rows(snapshot, config, collapsed_groups);
+pub(super) fn render_agent_list<T>(
+    buffer: &mut Buffer,
+    area: Rect,
+    rows: &[T],
+    empty_message: Option<&str>,
+    config: &ClientShellConfig,
+    agent_scroll: &mut usize,
+    hits: &mut ShellHitMap,
+    row_lines: impl Fn(&T) -> usize,
+    mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
+) {
     let body = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -148,13 +210,13 @@ pub(super) fn render_agent_panel(
     hits.agent_body = body;
     if body.is_empty() || rows.is_empty() {
         *agent_scroll = 0;
-        if !body.is_empty() && snapshot.agent_view_label.is_some() {
+        if let Some(message) = empty_message.filter(|_| !body.is_empty()) {
             put_text(
                 buffer,
                 body.x,
                 body.y,
                 body.width,
-                " no matching agents",
+                message,
                 Style::default()
                     .fg(config.palette.overlay0)
                     .add_modifier(Modifier::DIM),
@@ -165,7 +227,7 @@ pub(super) fn render_agent_panel(
 
     let row_heights = rows
         .iter()
-        .map(|row| row.rows.len().max(1).min(u16::MAX as usize) as u16)
+        .map(|row| row_lines(row).max(1).min(u16::MAX as usize) as u16)
         .collect::<Vec<_>>();
     let gaps = rows
         .iter()
@@ -189,20 +251,12 @@ pub(super) fn render_agent_panel(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
     for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
-        let height = (row.rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+        let height = row_heights[index].min(body.height);
         if y.saturating_add(height) > body.bottom() {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, height);
-        match &row.target {
-            AgentRowTarget::Pane(pane_id) => hits.agents.push((rect, pane_id.clone())),
-            AgentRowTarget::Group(key) => hits.agent_groups.push(AgentGroupHit {
-                rect,
-                key: key.clone(),
-                focused: row.focused,
-            }),
-        }
-        render_agent_row(buffer, rect, row, config);
+        render_row(buffer, rect, row, hits);
         y = y
             .saturating_add(height)
             .saturating_add(if index + 1 < rows.len() {
@@ -219,17 +273,11 @@ pub(super) fn render_agent_panel(
     }
 }
 
-fn agent_rows(
+pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
-    collapsed_groups: &HashSet<String>,
+    machine: Option<&str>,
 ) -> Vec<AgentRow> {
-    if config.agent_panel_sort == crate::config::AgentPanelSortConfig::Tree
-        && snapshot.agent_view_label.is_none()
-    {
-        return tree_agent_rows(snapshot, collapsed_groups);
-    }
-
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .filter_map(|pane_id| {
@@ -237,7 +285,7 @@ fn agent_rows(
                 .agents
                 .iter()
                 .find(|agent| agent.pane_id == pane_id)?;
-            configured_agent_row(snapshot, config, agent)
+            configured_agent_row(snapshot, config, agent, machine)
         })
         .collect()
 }
@@ -246,6 +294,7 @@ fn configured_agent_row(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent: &crate::protocol::ClientShellAgent,
+    machine: Option<&str>,
 ) -> Option<AgentRow> {
     let workspace = snapshot
         .workspaces
@@ -287,6 +336,7 @@ fn configured_agent_row(
     let rows = crate::ui::sidebar_agent_rows(
         &config.agents,
         crate::ui::AgentTokenContext {
+            machine,
             workspace: &workspace.label,
             tab: tab_label,
             pane: agent
@@ -320,8 +370,7 @@ fn tree_agent_rows(
             .agents
             .iter()
             .filter(|agent| {
-                agent.workspace_id == workspace.workspace_id
-                    && is_visible_tree_agent(agent)
+                agent.workspace_id == workspace.workspace_id && is_visible_tree_agent(agent)
             })
             .collect::<Vec<_>>();
         if agents.is_empty() {
@@ -433,20 +482,22 @@ fn is_transient_shell(agent: &crate::protocol::ClientShellAgent) -> bool {
 }
 
 fn is_real_agent(agent: &crate::protocol::ClientShellAgent) -> bool {
-    !is_transient_shell(agent)
-        && (agent.agent.is_some() || agent.display_agent.is_some())
+    !is_transient_shell(agent) && (agent.agent.is_some() || agent.display_agent.is_some())
 }
 
 fn is_visible_tree_agent(agent: &crate::protocol::ClientShellAgent) -> bool {
     // A real agent can briefly inherit the transient-shell marker while its
     // lifecycle hook is being refreshed. Keep it in the Space tree whenever
     // Herdr still identifies an agent, while hiding plain directory shells.
-    !is_transient_shell(agent)
-        || agent.agent.is_some()
-        || agent.display_agent.is_some()
+    !is_transient_shell(agent) || agent.agent.is_some() || agent.display_agent.is_some()
 }
 
-fn render_agent_row(buffer: &mut Buffer, rect: Rect, row: &AgentRow, config: &ClientShellConfig) {
+pub(super) fn render_agent_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &AgentRow,
+    config: &ClientShellConfig,
+) {
     let palette = &config.palette;
     let row_style = if row.focused {
         Style::default().bg(palette.active_row_bg)
