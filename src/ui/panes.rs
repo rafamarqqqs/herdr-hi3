@@ -10,7 +10,6 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 #[cfg(test)]
 use super::text::display_width;
 use super::text::truncate_end;
-use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::AppState;
 use crate::layout::PaneInfo;
@@ -24,7 +23,7 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
 
 fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
     let label = label.trim();
-    if label.is_empty() || pane_width <= 4 {
+    if label.is_empty() || pane_width <= 6 {
         return None;
     }
     let max_label_width = pane_width.saturating_sub(4) as usize;
@@ -707,25 +706,19 @@ pub(crate) fn render_selection_highlight<P: PartialEq>(
     else {
         return;
     };
-    let style = automatic_selection_style(p, host_theme);
+    let bg = automatic_selection_bg(p, host_theme);
     for y in 0..inner.height {
         for x in 0..inner.width {
             if selection.contains(y, x, scroll_metrics) {
-                buffer[(inner.x + x, inner.y + y)].set_style(style);
+                // Change only the background so selection never destroys the
+                // terminal's foreground colors or text attributes.
+                buffer[(inner.x + x, inner.y + y)].set_bg(bg);
             }
         }
     }
 }
 
 type Rgb = (u8, u8, u8);
-
-fn automatic_selection_style(
-    p: &Palette,
-    host_theme: crate::terminal_theme::TerminalTheme,
-) -> Style {
-    let bg = automatic_selection_bg(p, host_theme);
-    Style::reset().fg(selection_fg_for_bg(bg, p)).bg(bg)
-}
 
 fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::TerminalTheme) -> Color {
     let Some(background) = host_theme.background.map(terminal_theme_to_rgb) else {
@@ -737,13 +730,22 @@ fn automatic_selection_bg(p: &Palette, host_theme: crate::terminal_theme::Termin
     } else {
         (0, 0, 0)
     };
-    let selected = mix_rgb(background, target, 0.28);
+    // Use a restrained tint so the selection reads as a translucent overlay
+    // instead of an opaque black/white rectangle over the terminal contents.
+    let selected = mix_rgb(background, target, 0.16);
     Color::Rgb(selected.0, selected.1, selected.2)
 }
 
 fn selection_palette_background(p: &Palette) -> Color {
     if p.panel_bg == Color::Reset {
-        p.surface_dim
+        // `surface_dim` is ANSI 234 in the terminal palette, which is nearly
+        // black and obscures the glyphs when the host theme is unavailable.
+        // Use the palette's dedicated selection tone instead.
+        if p.selection_bg == Color::Reset {
+            p.surface1
+        } else {
+            p.selection_bg
+        }
     } else {
         p.panel_bg
     }
@@ -751,18 +753,6 @@ fn selection_palette_background(p: &Palette) -> Color {
 
 fn terminal_theme_to_rgb(color: crate::terminal_theme::RgbColor) -> Rgb {
     (color.r, color.g, color.b)
-}
-
-fn selection_fg_for_bg(bg: Color, p: &Palette) -> Color {
-    color_to_rgb(bg)
-        .map(|bg| {
-            if relative_luminance(bg) < 0.5 {
-                Color::White
-            } else {
-                Color::Black
-            }
-        })
-        .unwrap_or_else(|| panel_contrast_fg(p))
 }
 
 fn mix_rgb(base: Rgb, target: Rgb, amount: f32) -> Rgb {
@@ -786,30 +776,6 @@ fn relative_luminance(color: Rgb) -> f32 {
         }
     }
     0.2126 * channel(color.0) + 0.7152 * channel(color.1) + 0.0722 * channel(color.2)
-}
-
-fn color_to_rgb(color: Color) -> Option<Rgb> {
-    match color {
-        Color::Reset => None,
-        Color::Black => Some((0, 0, 0)),
-        Color::Red => Some((128, 0, 0)),
-        Color::Green => Some((0, 128, 0)),
-        Color::Yellow => Some((128, 128, 0)),
-        Color::Blue => Some((0, 0, 128)),
-        Color::Magenta => Some((128, 0, 128)),
-        Color::Cyan => Some((0, 128, 128)),
-        Color::Gray => Some((192, 192, 192)),
-        Color::DarkGray => Some((128, 128, 128)),
-        Color::LightRed => Some((255, 0, 0)),
-        Color::LightGreen => Some((0, 255, 0)),
-        Color::LightYellow => Some((255, 255, 0)),
-        Color::LightBlue => Some((0, 0, 255)),
-        Color::LightMagenta => Some((255, 0, 255)),
-        Color::LightCyan => Some((0, 255, 255)),
-        Color::White => Some((255, 255, 255)),
-        Color::Rgb(r, g, b) => Some((r, g, b)),
-        Color::Indexed(_) => None,
-    }
 }
 
 #[cfg(test)]
@@ -1339,7 +1305,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let expected_style = automatic_selection_style(&palette, host_theme);
+        let expected_bg = automatic_selection_bg(&palette, host_theme);
         let selection = Some(Selection::absolute_range(
             PaneId::from_raw(1),
             (0, 0),
@@ -1380,16 +1346,15 @@ mod tests {
         let second = buffer[(1, 0)].style();
         let third = buffer[(2, 0)].style();
 
-        assert_eq!(first.fg, expected_style.fg);
-        assert_eq!(second.fg, expected_style.fg);
-        assert_eq!(third.fg, expected_style.fg);
-        assert_eq!(first.bg, expected_style.bg);
-        assert_eq!(second.bg, expected_style.bg);
-        assert_eq!(third.bg, expected_style.bg);
-        assert_eq!(first.add_modifier, expected_style.add_modifier);
-        assert_eq!(second.add_modifier, expected_style.add_modifier);
-        assert_eq!(third.add_modifier, expected_style.add_modifier);
-        assert!(!second.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(first.fg, Some(Color::Rgb(10, 220, 120)));
+        assert_eq!(second.fg, Some(Color::Rgb(220, 180, 40)));
+        assert_eq!(third.fg, Some(Color::Blue));
+        assert_eq!(first.bg, Some(expected_bg));
+        assert_eq!(second.bg, Some(expected_bg));
+        assert_eq!(third.bg, Some(expected_bg));
+        assert!(!first.add_modifier.contains(Modifier::BOLD));
+        assert!(second.add_modifier.contains(Modifier::BOLD));
+        assert!(!third.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

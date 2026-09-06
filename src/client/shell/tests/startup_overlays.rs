@@ -658,7 +658,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     assert_eq!(state.hits.global_launcher.width, 8);
     let launcher = state.hits.global_launcher;
     let shell_buffer = shell.to_ratatui_buffer().expect("shell buffer");
-    let badge_x = launcher.right().saturating_sub(6);
+    let badge_x = launcher.x;
     assert_eq!(
         shell_buffer[(badge_x, launcher.y)].fg,
         state.config.palette.accent

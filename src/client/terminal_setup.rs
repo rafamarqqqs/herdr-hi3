@@ -147,8 +147,21 @@ pub(super) fn write_terminal_restore_postlude(
             crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
         )?;
     }
-    // Restore a visible cursor and reset DECSCUSR back to the terminal default.
-    writer.write_all(b"\x1b[?25h\x1b[0 q")?;
+    // Restore both pointer and text cursor shapes to the host terminal defaults.
+    writer.write_all(b"\x1b]22;default\x07\x1b[?25h\x1b[0 q")?;
+    writer.flush()
+}
+
+pub(super) fn write_host_mouse_shape(
+    writer: &mut impl io::Write,
+    shape: super::shell::ClientHostMouseShape,
+) -> io::Result<()> {
+    let sequence = match shape {
+        super::shell::ClientHostMouseShape::Default => b"\x1b]22;default\x07".as_slice(),
+        super::shell::ClientHostMouseShape::Pointer => b"\x1b]22;pointer\x07".as_slice(),
+        super::shell::ClientHostMouseShape::Grabbing => b"\x1b]22;grabbing\x07".as_slice(),
+    };
+    writer.write_all(sequence)?;
     writer.flush()
 }
 

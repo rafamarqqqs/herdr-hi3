@@ -57,7 +57,7 @@ use terminal_setup::{
 #[cfg(test)]
 use terminal_setup::{
     should_enable_host_color_scheme_reports, windows_virtual_terminal_input_mode,
-    write_host_color_scheme_report_mode, write_terminal_restore_postlude,
+    write_host_color_scheme_report_mode, write_host_mouse_shape, write_terminal_restore_postlude,
 };
 
 #[cfg(unix)]
@@ -535,6 +535,23 @@ fn dispatch_client_shell_actions(
     let mut replay_mouse = Vec::new();
     for action in actions {
         match action {
+            shell::ClientShellAction::OpenExplorer => {
+                // Plugin actions are available over the CLI JSON API even on
+                // servers that do not advertise them on the UI transport.
+                let child = std::env::current_exe().and_then(|exe| {
+                    std::process::Command::new(exe)
+                        .args(["plugin", "action", "invoke", "herdr-sidebar.open-sidebar"])
+                        .env("HERDR_SOCKET_PATH", crate::api::socket_path())
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                });
+                match child {
+                    Ok(child) => detached_process_children.push(child),
+                    Err(err) => warn!(%err, "failed to invoke Explorer plugin action"),
+                }
+            }
             shell::ClientShellAction::Endpoint { boot_id, request } => {
                 endpoint_commands.enqueue(boot_id, request);
             }
@@ -687,6 +704,10 @@ fn finish_client_shell_input(
     if outcome.query_host_theme {
         query_host_terminal_theme();
     }
+    if let Some(shape) = outcome.mouse_shape {
+        terminal_setup::write_host_mouse_shape(&mut io::stdout(), shape)
+            .map_err(ClientError::ConnectionFailed)?;
+    }
     sync_client_shell_keyboard_report_all(state)?;
     let replay = dispatch_client_shell_actions(
         outcome.actions,
@@ -767,6 +788,16 @@ async fn run_client_loop(
     if let Some(shell) = state.shell.as_mut() {
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_methods(endpoint_methods);
+        shell.sleep_server = if is_remote_client {
+            std::env::var(crate::remote::REATTACH_COMMAND_ENV_VAR)
+                .map(|command| format!("remote server — {command}"))
+                .unwrap_or_else(|_| "connected remote server".to_owned())
+        } else {
+            format!(
+                "{} (local server)",
+                crate::platform::hostname().unwrap_or_else(|| "this Mac".to_owned())
+            )
+        };
     }
     debug!(?negotiated_encoding, "client render encoding active");
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
@@ -1772,6 +1803,13 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        let sleep_outcome = shell.tick_sleep(now);
+                        outcome.detach |= sleep_outcome.detach;
+                        outcome.repaint |= sleep_outcome.repaint;
+                        let drag_outcome = shell.tick_chrome_drag(now);
+                        outcome.repaint |= drag_outcome.repaint;
+                        outcome.resize |= drag_outcome.resize;
+                        outcome.actions.extend(drag_outcome.actions);
                         if let Some(expired) = expired_endpoint {
                             let (repaint, actions) = shell.handle_endpoint_result(
                                 &expired.boot_id,

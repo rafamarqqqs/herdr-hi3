@@ -17,6 +17,7 @@ mod preferences;
 mod render;
 mod scroll;
 mod settings;
+mod sleep;
 mod state;
 mod surface_patch;
 mod worktrees;

@@ -34,6 +34,8 @@ pub(super) fn integration_needs_install(info: &crate::api::schema::IntegrationIn
 impl ClientShellState {
     pub(super) fn open_settings_overlay(&mut self) {
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+            sleep_seconds: self.sleep_seconds,
+            app_settings: self.config.top_padding > 0,
             section: ClientSettingsSection::Theme,
             selected: theme_index(&self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
@@ -52,6 +54,10 @@ impl ClientShellState {
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
             ClientSettingsSection::Integrations => 0,
+            ClientSettingsSection::Sleep => super::sleep::SLEEP_TIMERS
+                .iter()
+                .position(|seconds| *seconds == self.sleep_seconds)
+                .unwrap_or(1),
         }
     }
 
@@ -60,6 +66,9 @@ impl ClientShellState {
         section: ClientSettingsSection,
         outcome: &mut ClientShellInput,
     ) {
+        if section == ClientSettingsSection::Sleep && self.config.top_padding == 0 {
+            return;
+        }
         let selected = self.selected_index_for_settings_section(section);
         let request_integrations = matches!(section, ClientSettingsSection::Integrations)
             && matches!(
@@ -88,8 +97,8 @@ impl ClientShellState {
             .iter()
             .position(|section| *section == settings.section)
             .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(ClientSettingsSection::ALL.len() as isize)
-            as usize;
+        let count = ClientSettingsSection::ALL.len() - usize::from(self.config.top_padding == 0);
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
         self.select_settings_section(ClientSettingsSection::ALL[next], outcome);
     }
 
@@ -100,6 +109,7 @@ impl ClientShellState {
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
+                ClientSettingsSection::Sleep => super::sleep::SLEEP_TIMERS.len(),
             },
             _ => 0,
         }
@@ -223,6 +233,20 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+            ClientSettingsSection::Sleep => {
+                if self.config.top_padding == 0 {
+                    return;
+                }
+                let Some(seconds) = super::sleep::SLEEP_TIMERS.get(selected) else {
+                    return;
+                };
+                self.sleep_seconds = *seconds;
+                if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+                    settings.sleep_seconds = self.sleep_seconds;
+                }
+                self.persist_chrome_preferences(outcome);
+                outcome.repaint = true;
+            }
         }
     }
 

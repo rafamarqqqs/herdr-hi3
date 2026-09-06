@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) const MIN_TAB_WIDTH: u16 = 8;
 pub(super) const NEW_TAB_WIDTH: u16 = 3;
-pub(super) const WORKSPACE_HEADER_ROWS: u16 = 2;
+pub(super) const WORKSPACE_HEADER_ROWS: u16 = 4;
 
 fn pane_surface_row<'a>(
     surface: &'a PaneSurfaceFrame,
@@ -69,6 +69,7 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) top_padding: u16,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -139,6 +140,7 @@ pub(super) struct ShellHitMap {
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
+    pub(super) agent_groups: Vec<AgentGroupHit>,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -148,6 +150,8 @@ pub(super) struct ShellHitMap {
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
+    pub(super) explorer_button: Rect,
+    pub(super) sleep_button: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
     pub(super) tab_scroll_right: Rect,
@@ -180,6 +184,13 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) release_notes_max_scroll: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct AgentGroupHit {
+    pub(super) rect: Rect,
+    pub(super) key: String,
+    pub(super) focused: bool,
 }
 
 #[derive(Clone)]
@@ -227,6 +238,64 @@ pub(super) struct ClientTabPress {
     pub(super) start_row: u16,
 }
 
+pub(super) struct ClientAgentPress {
+    pub(super) pane_id: String,
+    pub(super) label: Option<String>,
+    pub(super) source_tab_id: String,
+    pub(super) detach_on_click: bool,
+    pub(super) start_column: u16,
+    pub(super) start_row: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientPaneDropZone {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ClientPaneDropTarget {
+    pub(super) pane_id: String,
+    pub(super) tab_id: String,
+    pub(super) rect: Rect,
+    pub(super) zone: ClientPaneDropZone,
+}
+
+impl ClientPaneDropTarget {
+    pub(super) fn highlight_rect(&self) -> Rect {
+        let half_width = self.rect.width.saturating_add(1) / 2;
+        let half_height = self.rect.height.saturating_add(1) / 2;
+        match self.zone {
+            ClientPaneDropZone::Left => {
+                Rect::new(self.rect.x, self.rect.y, half_width, self.rect.height)
+            }
+            ClientPaneDropZone::Right => Rect::new(
+                self.rect.right().saturating_sub(half_width),
+                self.rect.y,
+                half_width,
+                self.rect.height,
+            ),
+            ClientPaneDropZone::Up => {
+                Rect::new(self.rect.x, self.rect.y, self.rect.width, half_height)
+            }
+            ClientPaneDropZone::Down => Rect::new(
+                self.rect.x,
+                self.rect.bottom().saturating_sub(half_height),
+                self.rect.width,
+                half_height,
+            ),
+        }
+    }
+}
+
+pub(super) struct ClientDragTabHover {
+    pub(super) tab_id: String,
+    pub(super) since: std::time::Instant,
+    pub(super) requested: bool,
+}
+
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
@@ -249,6 +318,17 @@ pub(super) enum ClientChromeDrag {
         tab_id: String,
         workspace_id: String,
         insert_index: Option<usize>,
+        origin_tab_id: String,
+        tab_hover: Option<ClientDragTabHover>,
+        pane_drop_target: Option<ClientPaneDropTarget>,
+    },
+    Pane {
+        pane_id: String,
+        origin_tab_id: String,
+        label: Option<String>,
+        tab_hover: Option<ClientDragTabHover>,
+        pane_drop_target: Option<ClientPaneDropTarget>,
+        new_tab_drop_target: bool,
     },
     Workspace {
         source_workspace_id: String,
@@ -269,6 +349,14 @@ pub(super) enum ClientChromeDrag {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ClientHostMouseShape {
+    #[default]
+    Default,
+    Pointer,
+    Grabbing,
+}
+
 pub(super) struct WorkspaceHit {
     pub(super) rect: Rect,
     pub(super) workspace_id: String,
@@ -285,6 +373,7 @@ pub(crate) enum ClientShellAction {
     ClipboardWrite(Vec<u8>),
     Request(ClientMessage),
     OpenSafeWebUrl(String),
+    OpenExplorer,
     ReplayMouse(Vec<crossterm::event::MouseEvent>),
     Keybind(crate::input::KeybindAction),
 }
@@ -296,6 +385,7 @@ pub(crate) struct ClientShellInput {
     pub resize: bool,
     pub query_host_appearance: bool,
     pub query_host_theme: bool,
+    pub mouse_shape: Option<ClientHostMouseShape>,
     pub requests: Vec<ClientMessage>,
     pub actions: Vec<ClientShellAction>,
 }
@@ -412,6 +502,7 @@ pub(super) enum ClientSettingsSection {
     Sound,
     Toast,
     Integrations,
+    Sleep,
 }
 
 impl ClientSettingsSection {
@@ -421,6 +512,7 @@ impl ClientSettingsSection {
         Self::Sound,
         Self::Toast,
         Self::Integrations,
+        Self::Sleep,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -430,12 +522,15 @@ impl ClientSettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::Integrations => "integrations",
+            Self::Sleep => "sleep",
         }
     }
 }
 
 #[derive(Debug)]
 pub(super) struct ClientSettingsOverlay {
+    pub(super) sleep_seconds: u64,
+    pub(super) app_settings: bool,
     pub(super) section: ClientSettingsSection,
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
@@ -858,6 +953,13 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) sleep_started: Option<std::time::Instant>,
+    pub(super) sleep_frame: usize,
+    pub(super) sleep_remaining: u64,
+    pub(super) sleep_phrase: &'static str,
+    pub(super) sleep_seconds: u64,
+    pub(super) hovered_sleep: bool,
+    pub(crate) sleep_server: String,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
@@ -873,8 +975,17 @@ pub(crate) struct ClientShellState {
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
+    pub(super) host_mouse_shape: ClientHostMouseShape,
+    pub(super) hovered_workspace_id: Option<String>,
+    pub(super) hovered_agent_pane_id: Option<String>,
+    pub(super) hovered_agent_group_key: Option<String>,
+    pub(super) hovered_new_workspace: bool,
+    pub(super) hovered_global_launcher: bool,
+    pub(super) hovered_pane_label_id: Option<String>,
+    pub(super) hovered_tab_id: Option<String>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
+    pub(super) agent_press: Option<ClientAgentPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
@@ -994,10 +1105,27 @@ impl ClientShellState {
             .map(|split| split.clamp(0.1, 0.9))
             .unwrap_or(0.5);
         if let Some(sort) = preferences.agent_panel_sort {
-            config.agent_panel_sort = sort;
+            // Keep the legacy two-mode Agents panel; the experimental tree
+            // presentation is intentionally disabled in the app.
+            config.agent_panel_sort = match sort {
+                crate::config::AgentPanelSortConfig::Tree => {
+                    crate::config::AgentPanelSortConfig::Spaces
+                }
+                other => other,
+            };
         }
         Self {
             config,
+            sleep_started: None,
+            sleep_frame: 0,
+            sleep_remaining: 0,
+            sleep_phrase: "",
+            sleep_seconds: preferences
+                .sleep_seconds
+                .filter(|seconds| super::sleep::SLEEP_TIMERS.contains(seconds))
+                .unwrap_or(10),
+            hovered_sleep: false,
+            sleep_server: String::new(),
             snapshot: None,
             pane_surface: None,
             graphics: crate::kitty_graphics::surface::ClientState::default(),
@@ -1015,9 +1143,25 @@ impl ClientShellState {
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
             chrome_drag: None,
+            host_mouse_shape: ClientHostMouseShape::default(),
+            hovered_workspace_id: None,
+            hovered_agent_pane_id: None,
+            hovered_agent_group_key: None,
+            hovered_new_workspace: false,
+            hovered_global_launcher: false,
+            hovered_pane_label_id: None,
+            hovered_tab_id: None,
             workspace_press: None,
             tab_press: None,
-            collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
+            agent_press: None,
+            // Tree groups are intentionally expanded on startup. Keep the
+            // preference field for compatibility, but do not restore the old
+            // tab/space collapse keys that made the agent tree look nested.
+            collapsed_groups: preferences
+                .collapsed_groups
+                .into_iter()
+                .filter(|key| !key.starts_with("agent-tree:"))
+                .collect(),
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1240,6 +1384,7 @@ impl ClientShellState {
             self.chrome_drag = None;
             self.workspace_press = None;
             self.tab_press = None;
+            self.agent_press = None;
             self.workspace_scroll = 0;
             self.agent_scroll = 0;
             self.tab_scroll = 0;
@@ -1251,6 +1396,7 @@ impl ClientShellState {
             self.last_tab_bar_width = None;
             self.last_composed_size = None;
             self.pending_requests.clear();
+            self.sleep_started = None;
             self.pane_scroll_in_flight.clear();
             self.pane_scroll_queued.clear();
             self.pane_scroll_targets.clear();
@@ -1536,6 +1682,7 @@ impl ClientShellState {
             self.chrome_drag = None;
             self.workspace_press = None;
             self.tab_press = None;
+            self.agent_press = None;
             if self.pane_mouse_gesture.as_ref().is_some_and(|gesture| {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())
             }) {

@@ -617,6 +617,51 @@ impl Workspace {
         true
     }
 
+    pub(crate) fn take_tab_for_merge(&mut self, tab_idx: usize) -> Option<Tab> {
+        if tab_idx >= self.tabs.len() {
+            return None;
+        }
+        let tab = self.tabs.remove(tab_idx);
+        self.adjust_active_tab_after_removal(tab_idx);
+        Some(tab)
+    }
+
+    pub(crate) fn restore_tab_after_failed_merge(&mut self, tab_idx: usize, tab: Tab) {
+        let tab_idx = tab_idx.min(self.tabs.len());
+        self.tabs.insert(tab_idx, tab);
+        self.active_tab = tab_idx;
+    }
+
+    pub(crate) fn insert_moved_tab_into_tab(
+        &mut self,
+        tab_idx: usize,
+        target_pane_id: PaneId,
+        moved: Tab,
+        direction: Direction,
+        moved_first: bool,
+        ratio: f32,
+        focus: bool,
+    ) -> Result<PaneId, Box<Tab>> {
+        let pane_ids = moved.layout.pane_ids();
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return Err(Box::new(moved));
+        };
+        let focused_pane_id =
+            tab.insert_existing_tab(target_pane_id, moved, direction, moved_first, ratio, focus)?;
+        for pane_id in pane_ids {
+            if !self.public_pane_numbers.contains_key(&pane_id) {
+                self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
+            }
+        }
+        Ok(focused_pane_id)
+    }
+
+    pub(crate) fn unregister_moved_tab_panes(&mut self, pane_ids: &[PaneId]) {
+        for pane_id in pane_ids {
+            self.unregister_pane(*pane_id);
+        }
+    }
+
     #[cfg(test)]
     pub fn close_active_tab(&mut self) -> bool {
         self.close_tab(self.active_tab)

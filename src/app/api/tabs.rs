@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabMoveParams, TabRenameParams, TabTarget,
+    TabMergeDirection, TabMergeParams, TabMoveParams, TabRenameParams, TabTarget,
 };
 use crate::app::{App, Mode};
 
@@ -210,6 +210,193 @@ impl App {
             });
         }
 
+        encode_success(id, ResponseResult::TabList { tabs })
+    }
+
+    pub(super) fn handle_tab_merge(&mut self, id: String, params: TabMergeParams) -> String {
+        let Some((source_ws_idx, source_tab_idx)) = self.parse_tab_id(&params.source_tab_id) else {
+            return tab_not_found(id, &params.source_tab_id);
+        };
+        let Some((target_ws_idx, target_tab_idx)) = self.parse_tab_id(&params.target_tab_id) else {
+            return tab_not_found(id, &params.target_tab_id);
+        };
+        if source_ws_idx == target_ws_idx && source_tab_idx == target_tab_idx {
+            return encode_error(
+                id,
+                "tab_merge_failed",
+                "source and target tabs are the same",
+            );
+        }
+        let Some((target_pane_ws_idx, target_pane_id)) = self.parse_pane_id(&params.target_pane_id)
+        else {
+            return encode_error(id, "pane_not_found", "target pane not found");
+        };
+        if target_pane_ws_idx != target_ws_idx
+            || self.state.workspaces[target_ws_idx].find_tab_index_for_pane(target_pane_id)
+                != Some(target_tab_idx)
+        {
+            return encode_error(id, "pane_not_found", "target pane is not in the target tab");
+        }
+        if self.state.workspaces[source_ws_idx].tabs[source_tab_idx].zoomed
+            || self.state.workspaces[target_ws_idx].tabs[target_tab_idx].zoomed
+        {
+            return encode_error(id, "tab_merge_failed", "zoomed tabs cannot be merged");
+        }
+
+        let source_tab_id = self
+            .public_tab_id(source_ws_idx, source_tab_idx)
+            .unwrap_or_else(|| params.source_tab_id.clone());
+        let source_workspace_id = self.public_workspace_id(source_ws_idx);
+        let source_workspace = self.workspace_info(source_ws_idx);
+        let source_pane_ids = self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+            .layout
+            .pane_ids();
+        let previous_public_pane_ids = source_pane_ids
+            .iter()
+            .filter_map(|pane_id| {
+                self.public_pane_id(source_ws_idx, *pane_id)
+                    .map(|public_id| (public_id, *pane_id))
+            })
+            .collect::<Vec<_>>();
+        let mut previous_focus = self.state.current_pane_focus_target();
+        let Some(moved_tab) =
+            self.state.workspaces[source_ws_idx].take_tab_for_merge(source_tab_idx)
+        else {
+            return encode_error(id, "tab_merge_failed", "source tab could not be moved");
+        };
+        if moved_tab.layout.pane_count() == 1 {
+            let label = moved_tab
+                .custom_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned);
+            let terminal_id = moved_tab.terminal_id(moved_tab.root_pane).cloned();
+            if let (Some(label), Some(terminal_id)) = (label, terminal_id) {
+                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                    if terminal.manual_label.is_none() {
+                        terminal.set_manual_label(label);
+                    }
+                }
+            }
+        }
+        let adjusted_target_tab_idx =
+            if source_ws_idx == target_ws_idx && source_tab_idx < target_tab_idx {
+                target_tab_idx.saturating_sub(1)
+            } else {
+                target_tab_idx
+            };
+        let direction = match params.direction {
+            TabMergeDirection::Left | TabMergeDirection::Right => {
+                ratatui::layout::Direction::Horizontal
+            }
+            TabMergeDirection::Up | TabMergeDirection::Down => ratatui::layout::Direction::Vertical,
+        };
+        let moved_first = matches!(
+            params.direction,
+            TabMergeDirection::Left | TabMergeDirection::Up
+        );
+        let ratio = params.ratio.unwrap_or(0.5);
+        let merged = self.state.workspaces[target_ws_idx].insert_moved_tab_into_tab(
+            adjusted_target_tab_idx,
+            target_pane_id,
+            moved_tab,
+            direction,
+            moved_first,
+            ratio,
+            true,
+        );
+        let moved_focus = match merged {
+            Ok(pane_id) => pane_id,
+            Err(moved_tab) => {
+                self.state.workspaces[source_ws_idx]
+                    .restore_tab_after_failed_merge(source_tab_idx, *moved_tab);
+                return encode_error(id, "tab_merge_failed", "target pane could not be split");
+            }
+        };
+
+        let cross_workspace = source_ws_idx != target_ws_idx;
+        if cross_workspace {
+            self.state.workspaces[source_ws_idx].unregister_moved_tab_panes(&source_pane_ids);
+            for (public_id, pane_id) in previous_public_pane_ids {
+                self.state.public_pane_id_aliases.insert(public_id, pane_id);
+            }
+        }
+
+        let source_workspace_empty = self.state.workspaces[source_ws_idx].tabs.is_empty();
+        if source_workspace_empty {
+            self.state.workspaces.remove(source_ws_idx);
+            if self.state.workspaces.is_empty() {
+                self.state.active = None;
+                self.state.selected = 0;
+            } else {
+                if let Some(active) = self.state.active {
+                    self.state.active = Some(if active == source_ws_idx {
+                        source_ws_idx.min(self.state.workspaces.len() - 1)
+                    } else if active > source_ws_idx {
+                        active - 1
+                    } else {
+                        active
+                    });
+                }
+                self.state.selected = if self.state.selected == source_ws_idx {
+                    source_ws_idx.min(self.state.workspaces.len() - 1)
+                } else if self.state.selected > source_ws_idx {
+                    self.state.selected - 1
+                } else {
+                    self.state.selected
+                };
+            }
+        }
+        let Some(final_target_ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.find_tab_index_for_pane(target_pane_id).is_some())
+        else {
+            return encode_error(id, "tab_merge_failed", "merged target disappeared");
+        };
+        let Some(final_target_tab_idx) =
+            self.state.workspaces[final_target_ws_idx].find_tab_index_for_pane(target_pane_id)
+        else {
+            return encode_error(id, "tab_merge_failed", "merged target disappeared");
+        };
+        let final_target_workspace_id = self.state.workspaces[final_target_ws_idx].id.clone();
+        self.state
+            .retarget_moved_panes_workspace(&source_pane_ids, &final_target_workspace_id);
+        if let Some(focus) = previous_focus.as_mut() {
+            if source_pane_ids.contains(&focus.pane_id) {
+                focus.workspace_id = final_target_workspace_id;
+            } else if source_workspace_empty && focus.workspace_id == source_workspace_id {
+                previous_focus = None;
+            }
+        }
+        self.state
+            .switch_workspace_tab(final_target_ws_idx, final_target_tab_idx);
+        self.state
+            .record_pane_focus_change(previous_focus, final_target_ws_idx, moved_focus);
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabClosed,
+            data: EventData::TabClosed {
+                tab_id: source_tab_id,
+                workspace_id: source_workspace_id.clone(),
+            },
+        });
+        if source_workspace_empty {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id: source_workspace_id,
+                    workspace: Some(source_workspace),
+                },
+            });
+        }
+        if let Some(layout) = self.pane_layout_snapshot(final_target_ws_idx, final_target_tab_idx) {
+            self.emit_layout_updated_snapshot(layout);
+        }
+
+        let tabs = self.tab_list_info(final_target_ws_idx);
         encode_success(id, ResponseResult::TabList { tabs })
     }
 
@@ -423,6 +610,155 @@ mod tests {
                     && tabs[2].tab_id == moved_id
             )
         }));
+    }
+
+    #[test]
+    fn api_tab_merge_preserves_single_pane_tab_name_as_drag_label() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("merge-tabs");
+        workspace.tabs[0].custom_name = Some("reviewer".into());
+        let source_pane = workspace.tabs[0].root_pane;
+        let source_terminal = workspace.tabs[0].terminal_id(source_pane).unwrap().clone();
+        let target_tab_idx = workspace.test_add_tab(Some("target"));
+        let target_pane = workspace.tabs[target_tab_idx].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let response = app.handle_tab_merge(
+            "req".into(),
+            TabMergeParams {
+                source_tab_id: app.public_tab_id(0, 0).unwrap(),
+                target_tab_id: app.public_tab_id(0, target_tab_idx).unwrap(),
+                target_pane_id: app.public_pane_id(0, target_pane).unwrap(),
+                direction: TabMergeDirection::Left,
+                ratio: Some(0.5),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabList { .. }));
+        assert_eq!(
+            app.state.terminals[&source_terminal]
+                .manual_label
+                .as_deref(),
+            Some("reviewer")
+        );
+    }
+
+    #[test]
+    fn api_tab_merge_preserves_a_multi_pane_source_layout() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("merge-tabs");
+        let source_left = workspace.tabs[0].root_pane;
+        let source_right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let target_tab_idx = workspace.test_add_tab(Some("target"));
+        let target_pane = workspace.tabs[target_tab_idx].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let source_tab_id = app.public_tab_id(0, 0).unwrap();
+        let target_tab_id = app.public_tab_id(0, target_tab_idx).unwrap();
+        let target_pane_id = app.public_pane_id(0, target_pane).unwrap();
+
+        let response = app.handle_tab_merge(
+            "req".into(),
+            TabMergeParams {
+                source_tab_id,
+                target_tab_id,
+                target_pane_id,
+                direction: TabMergeDirection::Left,
+                ratio: Some(0.5),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabList { .. }));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        let merged = &app.state.workspaces[0].tabs[0];
+        assert_eq!(merged.layout.pane_count(), 3);
+        assert_eq!(merged.layout.focused(), source_right);
+        let panes = merged
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let rect = |pane_id| {
+            panes
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .map(|pane| pane.rect)
+                .expect("merged pane should remain present")
+        };
+        assert_eq!(rect(source_left), ratatui::layout::Rect::new(0, 0, 25, 40));
+        assert_eq!(
+            rect(source_right),
+            ratatui::layout::Rect::new(25, 0, 25, 40)
+        );
+        assert_eq!(rect(target_pane), ratatui::layout::Rect::new(50, 0, 50, 40));
+    }
+
+    #[test]
+    fn api_tab_merge_across_workspaces_closes_the_empty_source() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut source = Workspace::test_new("merge-source");
+        let moved_focus = source.test_split(ratatui::layout::Direction::Vertical);
+        let target = Workspace::test_new("merge-target");
+        let target_pane = target.tabs[0].root_pane;
+        app.state.workspaces = vec![source, target];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let source_tab_id = app.public_tab_id(0, 0).unwrap();
+        let old_moved_pane_id = app.public_pane_id(0, moved_focus).unwrap();
+        let target_tab_id = app.public_tab_id(1, 0).unwrap();
+        let target_pane_id = app.public_pane_id(1, target_pane).unwrap();
+
+        let response = app.handle_tab_merge(
+            "req".into(),
+            TabMergeParams {
+                source_tab_id,
+                target_tab_id,
+                target_pane_id,
+                direction: TabMergeDirection::Down,
+                ratio: None,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabList { .. }));
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 3);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            moved_focus
+        );
+        assert_eq!(
+            app.parse_pane_id(&old_moved_pane_id),
+            Some((0, moved_focus))
+        );
+        app.state.assert_invariants_for_test();
     }
 
     #[tokio::test]

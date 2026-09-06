@@ -286,6 +286,29 @@ impl AppState {
         }
     }
 
+    pub(crate) fn retarget_moved_panes_workspace(
+        &mut self,
+        pane_ids: &[PaneId],
+        workspace_id: &str,
+    ) {
+        let moved = |pane_id| pane_ids.contains(&pane_id);
+        if let Some(focus) = self.previous_pane_focus.as_mut() {
+            if moved(focus.pane_id) {
+                focus.workspace_id = workspace_id.to_owned();
+            }
+        }
+        if let Some(target) = self.toast.as_mut().and_then(|toast| toast.target.as_mut()) {
+            if moved(target.pane_id) {
+                target.workspace_id = workspace_id.to_owned();
+            }
+        }
+        for notification in self.pending_agent_notifications.values_mut() {
+            if moved(notification.pane_id) {
+                notification.workspace_id = workspace_id.to_owned();
+            }
+        }
+    }
+
     fn record_pane_focus_after_navigation(&mut self, previous: Option<PaneFocusTarget>) {
         let current = self.current_pane_focus_target();
         if previous != current {

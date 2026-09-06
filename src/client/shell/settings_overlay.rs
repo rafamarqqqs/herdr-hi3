@@ -73,6 +73,9 @@ pub(super) fn render_settings_overlay(
     let mut tab_x = inner.x;
     let mut tab_hits = Vec::new();
     for section in ClientSettingsSection::ALL {
+        if *section == ClientSettingsSection::Sleep && !settings.app_settings {
+            continue;
+        }
         let badge = *section == ClientSettingsSection::Integrations && integration_badge;
         let label = if badge {
             format!(" ● {} ", section.label())
@@ -196,6 +199,32 @@ pub(super) fn render_settings_overlay(
         }
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
+        }
+        ClientSettingsSection::Sleep => {
+            let labels = super::super::sleep::SLEEP_TIMERS
+                .iter()
+                .map(|seconds| {
+                    format!(
+                        "{seconds} seconds{}",
+                        if *seconds == settings.sleep_seconds {
+                            " ✓ current"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<Vec<_>>();
+            let choices = labels.iter().map(String::as_str).collect::<Vec<_>>();
+            render_choice_section(
+                buffer,
+                content,
+                "sleep countdown",
+                "click to apply; server work keeps running",
+                &choices,
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
         }
     }
 

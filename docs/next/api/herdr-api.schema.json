@@ -3150,6 +3150,26 @@
           ],
           "type": "object"
         },
+        "PaneRepositionParams": {
+          "description": "Atomic same-tab layout edit; does not detach or recreate a terminal.",
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/TabMergeDirection"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
         "PaneResizeParams": {
           "properties": {
             "amount": {
@@ -4368,6 +4388,45 @@
           },
           "type": "object"
         },
+        "TabMergeDirection": {
+          "enum": [
+            "left",
+            "right",
+            "up",
+            "down"
+          ],
+          "type": "string"
+        },
+        "TabMergeParams": {
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/TabMergeDirection"
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "source_tab_id": {
+              "type": "string"
+            },
+            "target_pane_id": {
+              "type": "string"
+            },
+            "target_tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_tab_id",
+            "target_tab_id",
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
         "TabMoveParams": {
           "properties": {
             "insert_index": {
@@ -5506,6 +5565,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.reposition",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneRepositionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.zoom",
               "type": "string"
             },
@@ -6343,6 +6418,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PluginPaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.merge",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabMergeParams"
             }
           },
           "required": [

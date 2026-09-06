@@ -88,6 +88,14 @@ pub struct PaneMoveParams {
     pub focus: bool,
 }
 
+/// Atomic same-tab layout edit; does not detach or recreate a terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneRepositionParams {
+    pub pane_id: String,
+    pub target_pane_id: String,
+    pub direction: super::tabs::TabMergeDirection,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PaneMoveDestination {

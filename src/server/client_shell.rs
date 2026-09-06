@@ -86,19 +86,20 @@ pub(super) fn snapshot(
         )
         .map(|(tab, state)| {
             let tab_id = tab.tab_id;
+            let custom_label = !state.is_auto_named();
             protocol::ClientShellTab {
                 focused: focused_tab_id.as_deref() == Some(tab_id.as_str()),
                 tab_id,
                 workspace_id: tab.workspace_id,
                 number: tab.number,
                 label: tab.label,
-                custom_label: !state.is_auto_named(),
+                custom_label,
                 zoomed: state.zoomed,
                 agent_status: tab.agent_status,
             }
         })
         .collect();
-    let panes = snapshot
+    let panes: Vec<protocol::ClientShellPane> = snapshot
         .panes
         .into_iter()
         .map(|pane| {
@@ -152,7 +153,7 @@ pub(super) fn snapshot(
                 focused,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     let agent_view_label = app
         .state
@@ -542,6 +543,36 @@ fn split_hit_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_uses_runtime_tab_labels_after_reorder() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("stable-tab-labels");
+        workspace.test_add_tab(None);
+        assert!(workspace.move_tab(0, 2));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snapshot = snapshot(&app, "boot", 1, None, None);
+        let labels = snapshot
+            .tabs
+            .iter()
+            .map(|tab| (tab.tab_id.as_str(), tab.label.as_str(), tab.custom_label))
+            .collect::<Vec<_>>();
+
+        // Automatic runtime labels follow the current order; the shared
+        // snapshot must not replace them with app-specific stable numbers.
+        assert_eq!(labels, vec![("w1:t2", "1", false), ("w1:t1", "2", false)]);
+    }
 
     #[test]
     fn snapshot_projects_cached_release_and_update_facts() {

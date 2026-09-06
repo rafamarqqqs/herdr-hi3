@@ -10,6 +10,7 @@ mod tabs;
 pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use overlays::{
     client_navigator_rows, render_client_overlay, render_context_menu, render_global_menu,
+    render_sleep_overlay,
 };
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
@@ -228,10 +229,14 @@ pub(super) fn render_shell(
         );
     }
     if layout.sidebar.width > 0 {
+        let mut sidebar_area = layout.sidebar;
+        if config.top_padding > 0 && sidebar_area.height > 2 {
+            sidebar_area.height -= 1;
+        }
         if state.sidebar_collapsed {
             render_collapsed_sidebar(
                 buffer,
-                layout.sidebar,
+                sidebar_area,
                 snapshot,
                 config,
                 state.selected_workspace_id,
@@ -240,11 +245,34 @@ pub(super) fn render_shell(
         } else {
             render_sidebar(
                 buffer,
-                layout.sidebar,
+                sidebar_area,
                 snapshot,
                 config,
                 &mut state,
                 &mut hits,
+            );
+        }
+        if sidebar_area.height < layout.sidebar.height {
+            let label = if state.sidebar_collapsed {
+                "☾"
+            } else {
+                "☾ sleep"
+            };
+            hits.sleep_button = Rect::new(
+                layout.sidebar.x + 1,
+                layout.sidebar.bottom() - 1,
+                display_width(label).min(layout.sidebar.width.saturating_sub(2)),
+                1,
+            );
+            put_text(
+                buffer,
+                hits.sleep_button.x,
+                hits.sleep_button.y,
+                hits.sleep_button.width,
+                label,
+                Style::default()
+                    .fg(config.palette.overlay1)
+                    .bg(config.palette.sidebar_bg),
             );
         }
     }
@@ -269,6 +297,7 @@ pub(super) fn render_shell(
         hits.new_workspace = Rect::default();
         hits.workspaces.clear();
         hits.agents.clear();
+        hits.agent_groups.clear();
         hits.tab_scroll_left = Rect::default();
         hits.tab_scroll_right = Rect::default();
         hits.new_tab = Rect::default();

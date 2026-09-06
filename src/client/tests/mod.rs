@@ -430,7 +430,29 @@ fn color_scheme_reports_are_enabled_only_for_full_clients() {
 fn terminal_restore_postlude_restores_visible_default_cursor() {
     let mut output = Vec::new();
     write_terminal_restore_postlude(&mut output, false).unwrap();
-    assert_eq!(output, b"\x1b[?25h\x1b[0 q");
+    assert_eq!(output, b"\x1b]22;default\x07\x1b[?25h\x1b[0 q");
+}
+
+#[test]
+fn host_mouse_shapes_use_osc22() {
+    for (shape, expected) in [
+        (
+            shell::ClientHostMouseShape::Default,
+            b"\x1b]22;default\x07".as_slice(),
+        ),
+        (
+            shell::ClientHostMouseShape::Pointer,
+            b"\x1b]22;pointer\x07".as_slice(),
+        ),
+        (
+            shell::ClientHostMouseShape::Grabbing,
+            b"\x1b]22;grabbing\x07".as_slice(),
+        ),
+    ] {
+        let mut output = Vec::new();
+        write_host_mouse_shape(&mut output, shape).unwrap();
+        assert_eq!(output, expected);
+    }
 }
 
 #[test]
@@ -451,7 +473,7 @@ fn terminal_restore_postlude_disables_color_scheme_reports_when_enabled() {
     expected.extend_from_slice(
         crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
     );
-    expected.extend_from_slice(b"\x1b[?25h\x1b[0 q");
+    expected.extend_from_slice(b"\x1b]22;default\x07\x1b[?25h\x1b[0 q");
     assert_eq!(output, expected);
 }
 

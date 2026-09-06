@@ -1,4 +1,5 @@
 use super::*;
+use ratatui::style::Color;
 
 fn restore_mode_bar(
     frame: &mut FrameData,
@@ -17,6 +18,125 @@ fn restore_mode_bar(
     {
         frame.cursor = None;
     }
+}
+
+pub(super) fn hover_background(palette: &Palette, focused: bool) -> ratatui::style::Color {
+    let _ = focused;
+    // Blend toward the sidebar, keeping hover much subtler than selection.
+    let base = if palette.sidebar_bg == Color::Reset {
+        palette.panel_bg
+    } else {
+        palette.sidebar_bg
+    };
+    match (base, palette.active_row_bg) {
+        (Color::Rgb(r, g, b), Color::Rgb(ar, ag, ab)) => {
+            let blend =
+                |base: u8, active: u8| ((u16::from(base) * 3 + u16::from(active)) / 4) as u8;
+            Color::Rgb(blend(r, ar), blend(g, ag), blend(b, ab))
+        }
+        _ => palette.surface0,
+    }
+}
+
+fn set_background(buffer: &mut Buffer, rect: Rect, color: ratatui::style::Color) {
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_bg(color);
+            }
+        }
+    }
+}
+
+fn workspace_hover_rect(hits: &ShellHitMap, workspace_id: &str) -> Option<Rect> {
+    hits.workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == workspace_id)
+        .map(|hit| hit.rect)
+}
+
+fn agent_hover_rect(hits: &ShellHitMap, pane_id: &str) -> Option<Rect> {
+    hits.agents
+        .iter()
+        .find(|(_, candidate)| candidate == pane_id)
+        .map(|(rect, _)| *rect)
+}
+
+fn pane_label_rect(
+    hits: &ShellHitMap,
+    snapshot: &ClientShellSnapshot,
+    pane_id: &str,
+    app_handle: bool,
+) -> Option<Rect> {
+    let hit = hits
+        .panes
+        .iter()
+        .find(|hit| !hit.popup && hit.pane_id == pane_id && hit.rect.y < hit.inner_rect.y)?;
+    if app_handle {
+        return pane_drag_handle_rect(hit);
+    }
+    let label = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == pane_id)?
+        .label
+        .as_deref()?
+        .trim();
+    if label.is_empty() || hit.rect.width <= 4 {
+        return None;
+    }
+    let width = unicode_width::UnicodeWidthStr::width(label)
+        .saturating_add(4)
+        .min(hit.rect.width.saturating_sub(2) as usize) as u16;
+    Some(Rect::new(
+        hit.rect.x.saturating_add(1),
+        hit.rect.y,
+        width,
+        1,
+    ))
+}
+
+pub(super) fn pane_drag_handle_rect(hit: &PaneHit) -> Option<Rect> {
+    (!hit.popup && hit.rect.y < hit.inner_rect.y && hit.rect.width > 6)
+        .then(|| Rect::new(hit.rect.x + 1, hit.rect.y, 3, 1))
+}
+
+pub(super) fn pane_header_label(
+    snapshot: &ClientShellSnapshot,
+    surface: &PaneSurfaceFrame,
+    pane_id: &str,
+) -> Option<String> {
+    if let Some(label) = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .and_then(|pane| pane.label.as_deref())
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        return Some(label.to_owned());
+    }
+    // Older servers only send dynamic titles in the rendered border. Reuse
+    // that visible name rather than inventing a different name when detached.
+    let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
+    if pane.rect.y >= pane.inner_rect.y {
+        return None;
+    }
+    let mut label = String::new();
+    for x in pane.rect.x.saturating_add(1)
+        ..pane
+            .rect
+            .x
+            .saturating_add(pane.rect.width)
+            .saturating_sub(1)
+    {
+        let index = usize::from(pane.rect.y) * usize::from(surface.frame.width) + usize::from(x);
+        if let Some(cell) = surface.frame.cells.get(index) {
+            label.push_str(&cell.symbol);
+        }
+    }
+    let label = label.trim_matches(|c: char| c.is_whitespace() || "─━═┌┐╭╮┬┤├┴⠿⋮⠇".contains(c));
+    (!label.is_empty()).then(|| label.to_owned())
 }
 
 impl ClientShellState {
@@ -47,6 +167,12 @@ impl ClientShellState {
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
+        if self.config.top_padding > 0 {
+            buffer.set_style(
+                Rect::new(0, 0, cols, self.config.top_padding.min(rows)),
+                Style::default().bg(self.config.palette.panel_bg),
+            );
+        }
         self.hits = render::render_shell(
             &mut buffer,
             layout,
@@ -172,13 +298,143 @@ impl ClientShellState {
             self.hits.tab_scroll_left = Rect::default();
             self.hits.tab_scroll_right = Rect::default();
         }
+        if let Some(workspace_id) = self.hovered_workspace_id.as_deref() {
+            let selected = self.mode == ClientShellMode::Navigate
+                && self.navigate_workspace_id.as_deref() == Some(workspace_id);
+            let focused = snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.workspace_id == workspace_id && workspace.focused);
+            if !selected && !focused {
+                if let Some(rect) = workspace_hover_rect(&self.hits, workspace_id) {
+                    set_background(
+                        &mut buffer,
+                        rect,
+                        hover_background(&self.config.palette, focused),
+                    );
+                }
+            }
+        }
+        if let Some(pane_id) = self.hovered_agent_pane_id.as_deref() {
+            let focused = snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.pane_id == pane_id && agent.focused);
+            if let Some(rect) = agent_hover_rect(&self.hits, pane_id).filter(|_| !focused) {
+                set_background(
+                    &mut buffer,
+                    rect,
+                    hover_background(&self.config.palette, focused),
+                );
+            }
+        }
+        if let Some(key) = self.hovered_agent_group_key.as_deref() {
+            if let Some(hit) = self
+                .hits
+                .agent_groups
+                .iter()
+                .find(|hit| hit.key == key && !hit.focused)
+            {
+                set_background(
+                    &mut buffer,
+                    hit.rect,
+                    hover_background(&self.config.palette, hit.focused),
+                );
+            }
+        }
+        if self.hovered_new_workspace {
+            set_background(
+                &mut buffer,
+                self.hits.new_workspace,
+                hover_background(&self.config.palette, false),
+            );
+        }
+        if self.hovered_sleep {
+            set_background(
+                &mut buffer,
+                self.hits.sleep_button,
+                hover_background(&self.config.palette, false),
+            );
+        }
+        if self.hovered_global_launcher {
+            set_background(
+                &mut buffer,
+                self.hits.global_launcher,
+                hover_background(&self.config.palette, false),
+            );
+        }
+        if let Some(tab_id) = self.hovered_tab_id.as_deref() {
+            if let Some((rect, _)) = self
+                .hits
+                .tabs
+                .iter()
+                .find(|(_, candidate)| candidate == tab_id)
+            {
+                let focused = snapshot
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.tab_id == tab_id && tab.focused);
+                if !focused {
+                    set_background(
+                        &mut buffer,
+                        *rect,
+                        hover_background(&self.config.palette, focused),
+                    );
+                }
+            }
+        }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        if self.config.top_padding > 0 && self.config.mouse_capture {
+            let cursor = frame.cursor.clone();
+            let mut composed = frame.to_ratatui_buffer()?;
+            for hit in &self.hits.panes {
+                let Some(handle) = pane_drag_handle_rect(hit) else {
+                    continue;
+                };
+                let style = Style::default().fg(self.config.palette.text);
+                let label = pane_header_label(snapshot, surface, &hit.pane_id).unwrap_or_default();
+                // Replace the old header, including any grip painted by an
+                // older server. The client owns exactly one grip + title.
+                for x in hit.rect.x + 1..hit.rect.right() - 1 {
+                    if let Some(cell) = composed.cell_mut((x, hit.rect.y)) {
+                        cell.set_symbol("─");
+                    }
+                }
+                composed.set_stringn(
+                    handle.x,
+                    handle.y,
+                    format!(" ⠿ {label} "),
+                    usize::from(hit.rect.width - 2),
+                    style,
+                );
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        if let Some(pane_id) = self.hovered_pane_label_id.as_deref() {
+            if let Some(rect) =
+                pane_label_rect(&self.hits, snapshot, pane_id, self.config.top_padding > 0)
+            {
+                let focused = snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == pane_id && pane.focused);
+                let cursor = frame.cursor.clone();
+                if let Some(mut composed) = frame.to_ratatui_buffer().filter(|_| !focused) {
+                    set_background(
+                        &mut composed,
+                        rect,
+                        hover_background(&self.config.palette, focused),
+                    );
+                    frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+                }
+            }
+        }
         let has_selection = self
             .selection
             .as_ref()
@@ -232,6 +488,66 @@ impl ClientShellState {
                 }
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+        }
+        let pane_drop_target = match self.chrome_drag.as_ref() {
+            Some(ClientChromeDrag::Tab {
+                pane_drop_target, ..
+            })
+            | Some(ClientChromeDrag::Pane {
+                pane_drop_target, ..
+            }) => pane_drop_target.as_ref(),
+            _ => None,
+        };
+        if let Some(target) = pane_drop_target {
+            let rect = target.highlight_rect();
+            if rect.width > 0 && rect.height > 0 {
+                let cursor = frame.cursor.clone();
+                let mut composed = frame.to_ratatui_buffer()?;
+                let right = rect
+                    .right()
+                    .saturating_sub(1)
+                    .min(frame.width.saturating_sub(1));
+                let bottom = rect
+                    .bottom()
+                    .saturating_sub(1)
+                    .min(frame.height.saturating_sub(1));
+                for y in rect.y..=bottom {
+                    for x in rect.x..=right {
+                        if x == rect.x || x == right || y == rect.y || y == bottom {
+                            let base = match composed[(x, y)].bg {
+                                Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+                                _ => self.config.palette.panel_bg,
+                            };
+                            let color = match (base, self.config.palette.accent) {
+                                (Color::Rgb(r, g, b), Color::Rgb(ar, ag, ab)) => {
+                                    let mix = |base: u8, accent: u8| {
+                                        ((u16::from(base) * 7 + u16::from(accent)) / 8) as u8
+                                    };
+                                    Color::Rgb(mix(r, ar), mix(g, ag), mix(b, ab))
+                                }
+                                _ => self.config.palette.surface0,
+                            };
+                            composed[(x, y)].set_bg(color);
+                        }
+                    }
+                }
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+            }
+        }
+        if matches!(
+            self.chrome_drag.as_ref(),
+            Some(ClientChromeDrag::Pane { .. })
+        ) || self.agent_press.is_some()
+        {
+            if !self.hits.new_tab.is_empty() {
+                let cursor = frame.cursor.clone();
+                let mut composed = frame.to_ratatui_buffer()?;
+                composed.set_style(
+                    self.hits.new_tab,
+                    Style::default().bg(hover_background(&self.config.palette, false)),
+                );
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
+            }
         }
         if self.mode == ClientShellMode::Copy {
             frame.cursor = None;
@@ -473,6 +789,19 @@ impl ClientShellState {
             notes.scroll = notes
                 .scroll
                 .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
+        }
+        if self.sleep_started.is_some() {
+            let mut buffer = frame.to_ratatui_buffer()?;
+            render::render_sleep_overlay(
+                &mut buffer,
+                &self.sleep_server,
+                self.sleep_frame,
+                self.sleep_remaining,
+                self.sleep_phrase,
+                snapshot,
+                &self.config.palette,
+            );
+            frame.replace_from_ratatui_buffer_preserving_effects(&buffer, None);
         }
         self.compose_graphics(&mut frame, layout);
         Some(frame)

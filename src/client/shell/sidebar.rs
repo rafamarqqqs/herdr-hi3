@@ -31,8 +31,20 @@ pub(crate) fn render_collapsed_sidebar(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
+    hits.explorer_button = Rect::default();
     render_sidebar_background(buffer, area, palette);
-    let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    let toggle_rows = if config.top_padding > 0 {
+        area.height.min(2)
+    } else {
+        0
+    };
+    let content_area = Rect::new(
+        area.x,
+        area.y + toggle_rows,
+        area.width,
+        area.height.saturating_sub(toggle_rows),
+    );
+    let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(content_area);
     for (index, workspace) in snapshot
         .workspaces
         .iter()
@@ -57,31 +69,26 @@ pub(crate) fn render_collapsed_sidebar(
         } else if workspace.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
-        let number_style = if selected {
-            Style::default()
-                .fg(palette.overlay1)
-                .bg(selection_background)
-        } else if workspace.focused {
-            Style::default().fg(palette.text).bg(palette.active_row_bg)
-        } else {
-            Style::default().fg(palette.overlay0)
-        };
-        put_text(
-            buffer,
-            rect.x,
-            rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            number_style,
-        );
         let status = workspace.agent_status;
         put_text(
             buffer,
-            rect.x.saturating_add(2),
+            rect.x.saturating_add(if config.top_padding > 0 {
+                rect.width / 2
+            } else {
+                1
+            }),
             rect.y,
-            rect.width.saturating_sub(2),
+            rect.width.saturating_sub(1),
             status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
+            Style::default()
+                .fg(status_color(status, palette))
+                .bg(if selected {
+                    selection_background
+                } else if workspace.focused {
+                    palette.active_row_bg
+                } else {
+                    palette.panel_bg
+                }),
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
@@ -131,21 +138,13 @@ pub(crate) fn render_collapsed_sidebar(
         }
         put_text(
             buffer,
-            rect.x,
-            rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            Style::default().fg(if agent.focused {
-                palette.text
+            rect.x.saturating_add(if config.top_padding > 0 {
+                rect.width / 2
             } else {
-                palette.overlay0
+                1
             }),
-        );
-        put_text(
-            buffer,
-            rect.x.saturating_add(2),
             rect.y,
-            rect.width.saturating_sub(2),
+            rect.width.saturating_sub(1),
             status_icon(agent.agent_status, config.status_indicators),
             Style::default().fg(status_color(agent.agent_status, palette)),
         );
@@ -153,6 +152,9 @@ pub(crate) fn render_collapsed_sidebar(
     }
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
         Rect::default()
+    } else if config.top_padding > 0 {
+        // Keep the app's reopen control at the top edge when collapsed.
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), toggle_rows)
     } else {
         Rect::new(
             workspace_area.x + workspace_area.width / 2,
@@ -163,7 +165,12 @@ pub(crate) fn render_collapsed_sidebar(
     };
     put_text(
         buffer,
-        hits.sidebar_toggle.x,
+        hits.sidebar_toggle.x
+            + if config.top_padding > 0 {
+                hits.sidebar_toggle.width / 2
+            } else {
+                0
+            },
         hits.sidebar_toggle.y,
         hits.sidebar_toggle.width,
         "»",
@@ -186,6 +193,7 @@ pub(crate) fn render_sidebar(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
+    hits.explorer_button = Rect::default();
     render_sidebar_background(buffer, area, palette);
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
@@ -196,25 +204,159 @@ pub(crate) fn render_sidebar(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
-    put_text(
-        buffer,
-        workspace_area.x,
-        workspace_area.y,
-        workspace_area.width,
-        " spaces",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
-    );
+    if config.mouse_capture && workspace_area.height > 0 {
+        hits.new_workspace = Rect::new(
+            workspace_area.x,
+            workspace_area.y,
+            5.min(workspace_area.width),
+            1,
+        );
+        put_text(
+            buffer,
+            workspace_area.x,
+            workspace_area.y,
+            workspace_area.width,
+            "+ new",
+            Style::default().fg(palette.overlay0),
+        );
+        let attention = super::super::global_menu::global_menu_attention(snapshot);
+        let launcher_label = "menu ⌄";
+        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
+        hits.global_launcher = Rect::new(
+            workspace_area.right().saturating_sub(launcher_width),
+            workspace_area.y,
+            launcher_width,
+            1,
+        );
+        if attention {
+            let start_x = workspace_area.right().saturating_sub(8);
+            put_text(
+                buffer,
+                start_x,
+                workspace_area.y,
+                2,
+                "● ",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            put_text(
+                buffer,
+                start_x.saturating_add(2),
+                workspace_area.y,
+                6,
+                launcher_label,
+                Style::default().fg(palette.overlay0),
+            );
+        } else {
+            put_text(
+                buffer,
+                workspace_area.right().saturating_sub(6),
+                workspace_area.y,
+                6,
+                launcher_label,
+                Style::default().fg(palette.overlay0),
+            );
+        }
+        if config.top_padding > 0 {
+            // App-only activity bar: three evenly spaced actions.
+            let button_width = workspace_area.width.saturating_sub(4) / 3;
+            let gap = 1u16;
+            let total_width = (button_width * 3).saturating_add(gap * 2);
+            let margin = workspace_area.width.saturating_sub(total_width) / 2;
+            let button_x = workspace_area.x.saturating_add(margin);
+            put_text(
+                buffer,
+                workspace_area.x,
+                workspace_area.y,
+                workspace_area.width,
+                &" ".repeat(workspace_area.width as usize),
+                Style::default().bg(palette.sidebar_bg),
+            );
+            hits.global_launcher = Rect::new(button_x, workspace_area.y, button_width, 1);
+            hits.new_workspace = Rect::new(
+                button_x.saturating_add(button_width + gap),
+                workspace_area.y,
+                button_width,
+                1,
+            );
+            hits.explorer_button = Rect::new(
+                button_x.saturating_add((button_width + gap) * 2),
+                workspace_area.y,
+                button_width,
+                1,
+            );
+            put_text(
+                buffer,
+                hits.global_launcher.x + button_width.saturating_sub(4) / 2,
+                workspace_area.y,
+                button_width,
+                "menu",
+                Style::default().fg(palette.overlay0),
+            );
+            put_text(
+                buffer,
+                hits.new_workspace.x + button_width.saturating_sub(3) / 2,
+                workspace_area.y,
+                button_width,
+                "new",
+                Style::default().fg(palette.overlay0),
+            );
+            put_text(
+                buffer,
+                hits.explorer_button.x + button_width.saturating_sub(8) / 2,
+                workspace_area.y,
+                hits.explorer_button.width,
+                "explorer",
+                Style::default().fg(palette.overlay0),
+            );
+        }
+    }
+    if workspace_area.height > 1 {
+        put_text(
+            buffer,
+            workspace_area.x,
+            workspace_area.y + 1,
+            workspace_area.width,
+            &"─".repeat(workspace_area.width as usize),
+            Style::default().fg(palette.surface_dim),
+        );
+    }
+    if workspace_area.height > 2 {
+        put_text(
+            buffer,
+            workspace_area.x,
+            workspace_area.y + 2,
+            workspace_area.width,
+            " spaces",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::BOLD),
+        );
+        if config.top_padding > 0 {
+            hits.sidebar_toggle = Rect::new(
+                workspace_area.right().saturating_sub(4),
+                workspace_area.y + 2,
+                4.min(workspace_area.width),
+                2.min(workspace_area.height.saturating_sub(2)),
+            );
+            put_text(
+                buffer,
+                hits.sidebar_toggle.x + hits.sidebar_toggle.width / 2,
+                hits.sidebar_toggle.y,
+                hits.sidebar_toggle.width,
+                "«",
+                Style::default().fg(palette.overlay0),
+            );
+        }
+    }
 
     let entries = workspace_entries(snapshot, state.collapsed_groups);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
         workspace_area.width,
-        workspace_area
-            .height
-            .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
+        workspace_area.height.saturating_sub(WORKSPACE_HEADER_ROWS),
     );
     hits.workspace_body = body;
     let row_heights = entries
@@ -300,6 +442,20 @@ pub(crate) fn render_sidebar(
         } else if workspace.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
+        if (selected || workspace.focused) && rect.width > 0 {
+            put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                1,
+                "▌",
+                Style::default().fg(palette.accent).bg(if selected {
+                    palette.selection_bg
+                } else {
+                    palette.active_row_bg
+                }),
+            );
+        }
         render_workspace_rows(
             buffer,
             rect,
@@ -346,10 +502,10 @@ pub(crate) fn render_sidebar(
         super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
     }
 
-    if let Some(row) = state.workspace_drop_indicator_row.filter(|row| {
-        *row >= workspace_area.y.saturating_add(1)
-            && *row < workspace_area.bottom().saturating_sub(1)
-    }) {
+    if let Some(row) = state
+        .workspace_drop_indicator_row
+        .filter(|row| *row >= body.y && *row < body.bottom())
+    {
         put_text(
             buffer,
             body.x,
@@ -360,84 +516,32 @@ pub(crate) fn render_sidebar(
         );
     }
 
-    let footer_y = workspace_area.bottom().saturating_sub(1);
-    if config.mouse_capture {
-        hits.new_workspace = Rect::new(
-            workspace_area.x,
-            footer_y,
-            5.min(workspace_area.width),
-            u16::from(workspace_area.height > 0),
-        );
-        put_text(
-            buffer,
-            workspace_area.x,
-            footer_y,
-            workspace_area.width,
-            " new",
-            Style::default().fg(palette.overlay0),
-        );
-        let attention = super::super::global_menu::global_menu_attention(snapshot);
-        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
-        hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(launcher_width),
-            footer_y,
-            launcher_width,
-            1,
-        );
-        if attention {
-            let start_x = workspace_area.right().saturating_sub(6);
-            put_text(
-                buffer,
-                start_x,
-                footer_y,
-                2,
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            );
-            put_text(
-                buffer,
-                start_x.saturating_add(2),
-                footer_y,
-                4,
-                "menu",
-                Style::default().fg(palette.overlay0),
-            );
-        } else {
-            put_right_text(
-                buffer,
-                workspace_area,
-                footer_y,
-                "menu",
-                Style::default().fg(palette.overlay0),
-            );
-        }
-    }
-
     super::render_agent_panel(
         buffer,
         detail_area,
         snapshot,
         config,
         state.agent_scroll,
+        state.collapsed_groups,
         hits,
     );
 
-    hits.sidebar_toggle = Rect::new(
-        area.right().saturating_sub(2),
-        area.bottom().saturating_sub(1),
-        u16::from(area.width > 1),
-        u16::from(area.height > 0),
-    );
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "«",
-        Style::default().fg(palette.overlay0),
-    );
+    if config.top_padding == 0 {
+        hits.sidebar_toggle = Rect::new(
+            area.right().saturating_sub(2),
+            area.bottom().saturating_sub(1),
+            u16::from(area.width > 1),
+            u16::from(area.height > 0),
+        );
+        put_text(
+            buffer,
+            hits.sidebar_toggle.x,
+            hits.sidebar_toggle.y,
+            hits.sidebar_toggle.width,
+            "«",
+            Style::default().fg(palette.overlay0),
+        );
+    }
 }
 
 pub(crate) fn render_sidebar_background(buffer: &mut Buffer, area: Rect, palette: &Palette) {

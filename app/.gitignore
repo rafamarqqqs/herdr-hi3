@@ -1,0 +1,10 @@
+/build/
+/dist/
+/Herdr.app/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+*.p12
+*.mobileprovision

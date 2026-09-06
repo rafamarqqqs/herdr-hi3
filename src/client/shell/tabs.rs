@@ -89,7 +89,6 @@ pub(crate) fn render_tab_bar(
         content.right().saturating_sub(new_tab_width)
     };
 
-    let mut first_visible = None;
     let mut last_visible = None;
     for (index, tab) in tabs.iter().enumerate().skip(*tab_scroll) {
         let name = tab_label(tab);
@@ -127,7 +126,6 @@ pub(crate) fn render_tab_bar(
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
         hits.tabs.push((rect, tab.tab_id.clone()));
-        first_visible.get_or_insert(index);
         last_visible = Some(index);
         x = x.saturating_add(width + 1);
         if width < desired {
@@ -177,37 +175,6 @@ pub(crate) fn render_tab_bar(
             hits.new_tab.width,
             " + ",
             Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
-    }
-
-    if first_visible.is_some_and(|index| index > 0) {
-        let ellipsis_x = if hits.tab_scroll_left.width > 0 {
-            hits.tab_scroll_left.right()
-        } else {
-            content.x
-        };
-        put_text(
-            buffer,
-            ellipsis_x,
-            area.y,
-            u16::from(ellipsis_x < content.right()),
-            "…",
-            Style::default().fg(palette.overlay0),
-        );
-    }
-    if last_visible.is_some_and(|index| index + 1 < tabs.len()) {
-        let ellipsis_x = if hits.tab_scroll_right.width > 0 {
-            hits.tab_scroll_right.x.saturating_sub(1)
-        } else {
-            content.right().saturating_sub(1)
-        };
-        put_text(
-            buffer,
-            ellipsis_x,
-            area.y,
-            u16::from(ellipsis_x >= content.x && ellipsis_x < content.right()),
-            "…",
-            Style::default().fg(palette.overlay0),
         );
     }
 
@@ -378,9 +345,35 @@ fn last_visible_tab(start: usize, widths: &[u16], available: u16) -> Option<usiz
 }
 
 fn tab_label(tab: &ClientShellTab) -> String {
-    if tab.zoomed {
-        format!("{} Z", tab.label)
-    } else {
+    let label = if tab.custom_label {
         tab.label.clone()
+    } else {
+        tab.number.to_string()
+    };
+    if tab.zoomed {
+        format!("{label} Z")
+    } else {
+        label
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_tab_label_uses_its_stable_number() {
+        let tab = ClientShellTab {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "2".into(),
+            custom_label: false,
+            zoomed: false,
+            focused: true,
+            agent_status: crate::api::schema::AgentStatus::Unknown,
+        };
+
+        assert_eq!(tab_label(&tab), "1");
     }
 }

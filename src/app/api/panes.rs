@@ -31,6 +31,69 @@ use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    pub(super) fn handle_pane_reposition(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneRepositionParams,
+    ) -> String {
+        use crate::api::schema::TabMergeDirection;
+        let resolve = |raw: &str| {
+            let (ws, pane) = self.parse_pane_id(raw)?;
+            let tab = self.state.workspaces[ws].find_tab_index_for_pane(pane)?;
+            Some((ws, tab, pane))
+        };
+        let Some((ws_idx, tab_idx, source)) = resolve(&params.pane_id) else {
+            return encode_error(id, "pane_not_found", "source pane not found");
+        };
+        let Some((target_ws, target_tab, target)) = resolve(&params.target_pane_id) else {
+            return encode_error(id, "pane_not_found", "target pane not found");
+        };
+        if (ws_idx, tab_idx) != (target_ws, target_tab) || source == target {
+            return encode_error(
+                id,
+                "invalid_pane_reposition",
+                "distinct panes in the same tab are required",
+            );
+        }
+        if self.state.workspaces[ws_idx].tabs[tab_idx].zoomed {
+            return encode_error(
+                id,
+                "invalid_pane_reposition",
+                "unzoom the tab before repositioning panes",
+            );
+        }
+        let direction = match params.direction {
+            TabMergeDirection::Left | TabMergeDirection::Right => {
+                ratatui::layout::Direction::Horizontal
+            }
+            TabMergeDirection::Up | TabMergeDirection::Down => ratatui::layout::Direction::Vertical,
+        };
+        let first = matches!(
+            params.direction,
+            TabMergeDirection::Left | TabMergeDirection::Up
+        );
+        let previous_focus = self.state.current_pane_focus_target();
+        let tab = &mut self.state.workspaces[ws_idx].tabs[tab_idx];
+        if !tab.layout.reposition_pane(source, target, direction, first) {
+            return encode_error(
+                id,
+                "invalid_pane_reposition",
+                "pane layout changed before repositioning",
+            );
+        }
+        tab.layout.focus_pane(source);
+        self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.state
+            .record_pane_focus_change(previous_focus, ws_idx, source);
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
+        let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
+            return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
+        };
+        self.emit_layout_updated_snapshot(layout.clone());
+        encode_success(id, ResponseResult::PaneLayout { layout })
+    }
+
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
             self.parse_pane_id(target_pane_id)
@@ -2972,6 +3035,86 @@ mod tests {
         );
 
         assert_eq!(metadata_error_code(&response), "pane_not_found");
+    }
+
+    #[test]
+    fn api_pane_reposition_preserves_pane_terminal_ids_names_and_root() {
+        let mut app = app_with_linked_worktree();
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        let source = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        seed_terminal_states(&mut app);
+        let terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let public = app.public_pane_id(0, source).unwrap();
+        let tab_public = app.public_tab_id(0, 0).unwrap();
+        let target_public = app.public_pane_id(0, target).unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_manual_label("zsh".into());
+        let original_name = app.pane_info(0, source).unwrap().label;
+        let response = app.handle_pane_reposition(
+            "req".into(),
+            crate::api::schema::PaneRepositionParams {
+                pane_id: public.clone(),
+                target_pane_id: target_public,
+                direction: crate::api::schema::TabMergeDirection::Left,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneLayout { .. }));
+        assert_eq!(app.public_pane_id(0, source).unwrap(), public);
+        assert_eq!(app.public_tab_id(0, 0).unwrap(), tab_public);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, target);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].terminal_id(source),
+            Some(&terminal)
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), source);
+        assert_eq!(app.pane_info(0, source).unwrap().label, original_name);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn api_pane_reposition_rejects_cross_tab_and_zoom_without_mutation() {
+        let mut app = app_with_linked_worktree();
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        let other = app.state.workspaces[0].test_add_tab(Some("other"));
+        let source = app.state.workspaces[0].tabs[other].root_pane;
+        let response = app.handle_pane_reposition(
+            "req".into(),
+            crate::api::schema::PaneRepositionParams {
+                pane_id: app.public_pane_id(0, source).unwrap(),
+                target_pane_id: app.public_pane_id(0, target).unwrap(),
+                direction: crate::api::schema::TabMergeDirection::Up,
+            },
+        );
+        assert_eq!(metadata_error_code(&response), "invalid_pane_reposition");
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs[other].root_pane, source);
+        let neighbor = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        let pane_tab = app.state.workspaces[0]
+            .find_tab_index_for_pane(neighbor)
+            .unwrap();
+        let neighbor_root = app.state.workspaces[0].tabs[pane_tab].root_pane;
+        app.state.workspaces[0].tabs[pane_tab].zoomed = true;
+        let before = app.state.workspaces[0].tabs[pane_tab].layout.pane_ids();
+        let response = app.handle_pane_reposition(
+            "req".into(),
+            crate::api::schema::PaneRepositionParams {
+                pane_id: app.public_pane_id(0, neighbor).unwrap(),
+                target_pane_id: app.public_pane_id(0, neighbor_root).unwrap(),
+                direction: crate::api::schema::TabMergeDirection::Left,
+            },
+        );
+        assert_eq!(metadata_error_code(&response), "invalid_pane_reposition");
+        assert_eq!(
+            app.state.workspaces[0].tabs[pane_tab].layout.pane_ids(),
+            before
+        );
     }
 
     #[test]

@@ -200,6 +200,45 @@ impl TileLayout {
         true
     }
 
+    /// Insert an existing pane tree next to a target while preserving every
+    /// split and ratio inside the moved tree.
+    pub fn insert_layout_near(
+        &mut self,
+        target: PaneId,
+        moved: &mut TileLayout,
+        direction: Direction,
+        moved_first: bool,
+        ratio: f32,
+        focus: bool,
+    ) -> Option<PaneId> {
+        let current_ids = self.pane_ids();
+        let moved_ids = moved.pane_ids();
+        if !current_ids.contains(&target)
+            || moved_ids
+                .iter()
+                .any(|pane_id| current_ids.contains(pane_id))
+        {
+            return None;
+        }
+
+        let moved_focus = moved.focus;
+        let placeholder = PaneId::from_raw(0);
+        let current_root = std::mem::replace(&mut self.root, Node::Pane(placeholder));
+        let moved_root = std::mem::replace(&mut moved.root, Node::Pane(placeholder));
+        self.root = insert_node_at(
+            current_root,
+            target,
+            direction,
+            moved_root,
+            moved_first,
+            valid_split_ratio(ratio),
+        );
+        if focus {
+            self.set_focus(moved_focus);
+        }
+        Some(moved_focus)
+    }
+
     /// Close the focused pane, returning focus to the pane it came from when
     /// that pane is still open. Returns false if it's the last pane.
     pub fn close_focused(&mut self) -> bool {
@@ -268,6 +307,37 @@ impl TileLayout {
             return false;
         }
         swap_pane_ids(&mut self.root, first, second);
+        true
+    }
+
+    /// Move an existing leaf beside another leaf, collapsing its old split.
+    /// This changes only geometry: identities and focus history stay intact.
+    pub fn reposition_pane(
+        &mut self,
+        moved: PaneId,
+        target: PaneId,
+        direction: Direction,
+        moved_first: bool,
+    ) -> bool {
+        if moved == target
+            || !node_contains_pane(&self.root, moved)
+            || !node_contains_pane(&self.root, target)
+        {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.root, Node::Pane(target));
+        // Distinct validated target guarantees a remaining root.
+        let Some(remaining) = remove_pane(old, moved) else {
+            return false;
+        };
+        self.root = insert_node_at(
+            remaining,
+            target,
+            direction,
+            Node::Pane(moved),
+            moved_first,
+            0.5,
+        );
         true
     }
 
@@ -616,6 +686,78 @@ fn split_at(
     }
 }
 
+fn insert_node_at(
+    node: Node,
+    target: PaneId,
+    direction: Direction,
+    inserted: Node,
+    inserted_first: bool,
+    split_ratio: f32,
+) -> Node {
+    match node {
+        Node::Pane(id) if id == target => {
+            let target = Node::Pane(id);
+            let (first, second) = if inserted_first {
+                (inserted, target)
+            } else {
+                (target, inserted)
+            };
+            Node::Split {
+                direction,
+                ratio: split_ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }
+        }
+        Node::Pane(_) => node,
+        Node::Split {
+            direction: existing_direction,
+            ratio,
+            first,
+            second,
+        } => {
+            if node_contains_pane(&first, target) {
+                Node::Split {
+                    direction: existing_direction,
+                    ratio,
+                    first: Box::new(insert_node_at(
+                        *first,
+                        target,
+                        direction,
+                        inserted,
+                        inserted_first,
+                        split_ratio,
+                    )),
+                    second,
+                }
+            } else {
+                Node::Split {
+                    direction: existing_direction,
+                    ratio,
+                    first,
+                    second: Box::new(insert_node_at(
+                        *second,
+                        target,
+                        direction,
+                        inserted,
+                        inserted_first,
+                        split_ratio,
+                    )),
+                }
+            }
+        }
+    }
+}
+
+fn node_contains_pane(node: &Node, target: PaneId) -> bool {
+    match node {
+        Node::Pane(id) => *id == target,
+        Node::Split { first, second, .. } => {
+            node_contains_pane(first, target) || node_contains_pane(second, target)
+        }
+    }
+}
+
 fn valid_split_ratio(ratio: f32) -> f32 {
     if ratio.is_finite() {
         ratio.clamp(0.1, 0.9)
@@ -715,6 +857,38 @@ mod tests {
 
     fn pane(id: u32) -> PaneId {
         PaneId::from_raw(id)
+    }
+
+    #[test]
+    fn reposition_rotates_two_pane_layout_and_preserves_identity_and_focus() {
+        let (mut layout, top) = TileLayout::new();
+        let bottom = layout.split_focused(Direction::Vertical);
+        let previous = layout.prev_focus;
+        assert!(layout.reposition_pane(bottom, top, Direction::Horizontal, true));
+        assert_eq!(pane_rect(&layout, bottom), Rect::new(0, 0, 50, 40));
+        assert_eq!(pane_rect(&layout, top), Rect::new(50, 0, 50, 40));
+        assert_eq!(layout.focused(), bottom);
+        assert_eq!(layout.prev_focus, previous);
+        assert!(layout.reposition_pane(bottom, top, Direction::Vertical, false));
+        assert_eq!(pane_rect(&layout, top), Rect::new(0, 0, 100, 20));
+        assert_eq!(pane_rect(&layout, bottom), Rect::new(0, 20, 100, 20));
+    }
+
+    #[test]
+    fn reposition_invalid_targets_are_noops_and_unrelated_branches_survive() {
+        let mut layout = sample_layout();
+        let before = pane_rects(&layout);
+        let splits = split_snapshot(&layout);
+        assert!(!layout.reposition_pane(pane(2), pane(2), Direction::Horizontal, true));
+        assert!(!layout.reposition_pane(pane(99), pane(2), Direction::Horizontal, true));
+        assert!(!layout.reposition_pane(pane(2), pane(99), Direction::Horizontal, true));
+        assert_eq!(pane_rects(&layout), before);
+        assert_eq!(split_snapshot(&layout), splits);
+        assert!(layout.reposition_pane(pane(4), pane(2), Direction::Horizontal, true));
+        assert_eq!(pane_rect(&layout, pane(1)), before[0].1);
+        let mut ids = layout.pane_ids();
+        ids.sort_by_key(|id| id.raw());
+        assert_eq!(ids, vec![pane(1), pane(2), pane(3), pane(4)]);
     }
 
     fn sample_layout() -> TileLayout {
@@ -825,6 +999,63 @@ mod tests {
         assert_eq!(splits, vec![(Direction::Horizontal, 0.25)]);
         assert_eq!(pane_rect(&layout, root), Rect::new(0, 0, 25, 40));
         assert_eq!(pane_rect(&layout, moved), Rect::new(25, 0, 75, 40));
+    }
+
+    #[test]
+    fn insert_layout_near_preserves_the_moved_subtree() {
+        let (mut target, target_root) = TileLayout::new();
+        let mut moved = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Vertical,
+                ratio: 0.25,
+                first: Box::new(Node::Pane(pane(98))),
+                second: Box::new(Node::Pane(pane(99))),
+            },
+            pane(99),
+        );
+
+        assert_eq!(
+            target.insert_layout_near(
+                target_root,
+                &mut moved,
+                Direction::Horizontal,
+                true,
+                0.5,
+                true,
+            ),
+            Some(pane(99))
+        );
+
+        assert_eq!(target.pane_ids(), vec![pane(98), pane(99), target_root]);
+        assert_eq!(target.focused(), pane(99));
+        assert_eq!(
+            split_snapshot(&target),
+            vec![(Direction::Horizontal, 0.5), (Direction::Vertical, 0.25),]
+        );
+        assert_eq!(pane_rect(&target, pane(98)), Rect::new(0, 0, 50, 10));
+        assert_eq!(pane_rect(&target, pane(99)), Rect::new(0, 10, 50, 30));
+        assert_eq!(pane_rect(&target, target_root), Rect::new(50, 0, 50, 40));
+    }
+
+    #[test]
+    fn insert_layout_near_splits_vertically_at_half() {
+        let (mut target, target_root) = TileLayout::new();
+        let (mut moved, moved_root) = TileLayout::new();
+
+        assert_eq!(
+            target.insert_layout_near(
+                target_root,
+                &mut moved,
+                Direction::Vertical,
+                false,
+                0.5,
+                true,
+            ),
+            Some(moved_root)
+        );
+
+        assert_eq!(pane_rect(&target, target_root), Rect::new(0, 0, 100, 20));
+        assert_eq!(pane_rect(&target, moved_root), Rect::new(0, 20, 100, 20));
     }
 
     #[test]

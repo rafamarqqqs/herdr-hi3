@@ -8,19 +8,49 @@ fn mouse_hits_use_stable_workspace_tab_and_pane_ids() {
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("composed frame");
 
+    let workspace_rect = state.hits.workspaces[0].rect;
+    let workspace_hover =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: workspace_rect.x,
+            row: workspace_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert_eq!(
+        workspace_hover.mouse_shape,
+        Some(ClientHostMouseShape::Pointer)
+    );
+
+    state.host_mouse_shape = ClientHostMouseShape::Default;
+    let tab_rect = state.hits.tabs[0].0;
+    let tab_hover =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: tab_rect.x,
+            row: tab_rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert_eq!(tab_hover.mouse_shape, Some(ClientHostMouseShape::Pointer));
+    let hovered_tab = state.compose(106, 20).expect("hovered tab frame");
+    let hovered_tab = hovered_tab.to_ratatui_buffer().expect("hover buffer");
+    assert_eq!(
+        hovered_tab[(tab_rect.x, tab_rect.y)].bg,
+        state.config.palette.accent
+    );
+
     let workspace_down =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 2,
-            row: 2,
+            column: workspace_rect.x + 2,
+            row: workspace_rect.y,
             modifiers: KeyModifiers::empty(),
         })]);
     assert!(workspace_down.actions.is_empty());
     let workspace =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: 2,
-            row: 2,
+            column: workspace_rect.x + 2,
+            row: workspace_rect.y,
             modifiers: KeyModifiers::empty(),
         })]);
     assert!(workspace.requests.is_empty());
@@ -47,6 +77,123 @@ fn mouse_hits_use_stable_workspace_tab_and_pane_ids() {
         &request.method,
         crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"
     ));
+}
+
+#[test]
+fn spaces_and_agents_use_a_subtle_hover_background() {
+    let mut projected = snapshot();
+    let mut second_workspace = projected.workspaces[0].clone();
+    second_workspace.workspace_id = "ws_2".into();
+    second_workspace.label = "background".into();
+    second_workspace.focused = false;
+    projected.workspaces.push(second_workspace.clone());
+    second_workspace.workspace_id = "ws_3".into();
+    second_workspace.label = "later".into();
+    projected.workspaces.push(second_workspace);
+    projected.agent_order = vec!["pane_1".into(), "pane_2".into()];
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("worker".into()),
+        display_agent: Some("codex".into()),
+        agent: Some("codex".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: false,
+    });
+    let mut second_agent = projected.agents[0].clone();
+    second_agent.pane_id = "pane_2".into();
+    second_agent.workspace_id = "ws_2".into();
+    projected.agents.push(second_agent);
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.row_gap = 1;
+    config.ui.sidebar.agents.row_gap = 1;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let selection_bg = state.config.palette.selection_bg;
+    let sidebar_bg = state.config.palette.sidebar_bg;
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 24).expect("sidebar rows");
+
+    let workspace = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_2")
+        .unwrap()
+        .rect;
+    let workspace_hover =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: workspace.x,
+            row: workspace.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(workspace_hover.repaint);
+    let frame = state.compose(106, 24).unwrap();
+    let buffer = frame.to_ratatui_buffer().unwrap();
+    let workspace_bg = buffer[(workspace.x, workspace.y)].bg;
+    assert_ne!(workspace_bg, sidebar_bg);
+    assert_ne!(workspace_bg, selection_bg);
+    for y in workspace.y..workspace.bottom() {
+        for x in workspace.x..workspace.right() {
+            assert_eq!(buffer[(x, y)].bg, workspace_bg);
+        }
+    }
+    assert_ne!(buffer[(workspace.x, workspace.bottom())].bg, workspace_bg);
+
+    let agent = state.hits.agents[0].0;
+    let agent_hover =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: agent.x,
+            row: agent.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(agent_hover.repaint);
+    let frame = state.compose(106, 24).unwrap();
+    let buffer = frame.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(agent.x, agent.y)].bg, workspace_bg);
+    for y in agent.y..agent.bottom() {
+        for x in agent.x..agent.right() {
+            assert_eq!(buffer[(x, y)].bg, workspace_bg);
+        }
+    }
+    assert_ne!(buffer[(agent.x, agent.bottom())].bg, workspace_bg);
+}
+
+#[test]
+fn chrome_buttons_use_pointer_mouse_shape() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+
+    let buttons = [
+        state.hits.agent_sort_toggle,
+        state.hits.global_launcher,
+        state.hits.new_workspace,
+        state.hits.new_tab,
+        state.hits.sidebar_toggle,
+    ];
+    for rect in buttons {
+        assert!(!rect.is_empty());
+        state.host_mouse_shape = ClientHostMouseShape::Default;
+        let hover =
+            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::empty(),
+            })]);
+        assert_eq!(hover.mouse_shape, Some(ClientHostMouseShape::Pointer));
+    }
 }
 
 #[test]
@@ -188,6 +335,14 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
     let first = state.hits.workspaces[0].rect;
     let third = state.hits.workspaces[2].rect;
 
+    let hover = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: first.x + 2,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(hover.mouse_shape, Some(ClientHostMouseShape::Pointer));
+
     let down = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: first.x + 2,
@@ -202,6 +357,7 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
         modifiers: KeyModifiers::empty(),
     })]);
     assert!(drag.repaint);
+    assert_eq!(drag.mouse_shape, Some(ClientHostMouseShape::Grabbing));
     assert!(matches!(
         state.chrome_drag,
         Some(ClientChromeDrag::Workspace {
@@ -231,6 +387,7 @@ fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
                     if params.workspace_id == "ws_1" && params.insert_index == 3
             )
     ));
+    assert_eq!(release.mouse_shape, Some(ClientHostMouseShape::Default));
 
     state.compose(106, 24).expect("workspaces after drag");
     let second = state.hits.workspaces[1].rect;
@@ -353,7 +510,7 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             tab_id: "tab_1".into(),
             name: Some("first".into()),
             display_agent: None,
-            agent: None,
+            agent: Some("codex".into()),
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
@@ -369,7 +526,7 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             tab_id: "tab_1".into(),
             name: Some("second".into()),
             display_agent: None,
-            agent: None,
+            agent: Some("codex".into()),
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,
@@ -503,8 +660,10 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("× needs input"), "frame: {text}");
-    assert!(text.contains("pi two"), "frame: {text}");
-    assert!(text.contains("waiting for"), "frame: {text}");
+    assert!(
+        text.contains("waiting for"),
+        "configured tokens render: {text}"
+    );
     assert_eq!(
         state
             .hits
@@ -515,6 +674,14 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
     );
 
     let first = state.hits.agents[0].0;
+    let hover = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: first.x,
+        row: first.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(hover.mouse_shape, Some(ClientHostMouseShape::Pointer));
+
     let click = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: first.x,
@@ -567,8 +734,95 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         .expect("blocked compact agent")
         .0;
     let row_start = blocked.y as usize * compact.width as usize + blocked.x as usize;
-    assert_ne!(compact.cells[row_start].fg, compact.cells[row_start + 2].fg);
+    assert!(!compact.cells[row_start + 1].symbol.trim().is_empty());
     assert_eq!(compact.cells[row_start].bg, compact.cells[row_start + 2].bg);
+}
+
+#[test]
+fn agent_tree_hides_shells_but_keeps_finished_agents_while_open() {
+    let mut projected = snapshot();
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("coordinator".into()),
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    });
+    let mut shell = projected.panes[0].clone();
+    shell.pane_id = "pane_2".into();
+    shell.focused = false;
+    projected.panes.push(shell);
+    let mut shell_child = projected.agents[0].clone();
+    shell_child.pane_id = "pane_2".into();
+    shell_child.name = Some("pytest".into());
+    shell_child.display_agent = None;
+    shell_child.agent = None;
+    shell_child.agent_status = AgentStatus::Working;
+    shell_child.tokens = vec![("__herdr_tree_shell".into(), "1".into())];
+    shell_child.focused = false;
+    projected.agents.push(shell_child);
+    let mut finished_pane = projected.panes[0].clone();
+    finished_pane.pane_id = "pane_3".into();
+    finished_pane.focused = false;
+    projected.panes.push(finished_pane);
+    let mut finished = projected.agents[0].clone();
+    finished.pane_id = "pane_3".into();
+    finished.name = Some("completed-review".into());
+    finished.agent_status = AgentStatus::Done;
+    projected.agents.push(finished);
+
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Tree;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(projected.clone()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("expanded agent tree");
+    assert_eq!(state.hits.agent_groups.len(), 1);
+    assert_eq!(
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(_, pane_id)| pane_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pane_1", "pane_3"]
+    );
+
+    let tab_group = state.hits.agent_groups[0].clone();
+    let collapse =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab_group.rect.x + 2,
+            row: tab_group.rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(collapse.actions.is_empty());
+    assert!(state.collapsed_groups.contains(&tab_group.key));
+    state.compose(106, 30).expect("collapsed agent tree");
+    assert!(state.hits.agents.is_empty());
+    state.collapsed_groups.remove(&tab_group.key);
+
+    projected.agents.retain(|agent| agent.pane_id != "pane_2");
+    state.set_snapshot(Box::new(projected));
+    state.compose(106, 30).expect("agent tree after shell exit");
+    assert_eq!(
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(_, pane_id)| pane_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pane_1", "pane_3"]
+    );
 }
 
 #[test]

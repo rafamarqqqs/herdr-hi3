@@ -159,6 +159,14 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         for event in events {
+            if self.sleep_started.is_some() {
+                if matches!(&event, RawInputEvent::Key(key) if key.code == KeyCode::Esc) {
+                    self.sleep_started = None;
+                    outcome.repaint = true;
+                }
+                // Do not leak dialog input to a working terminal behind it.
+                continue;
+            }
             if let Some(update) = host_theme_update(&event) {
                 push_host_theme_update(&mut outcome.requests, update);
             }
@@ -231,7 +239,10 @@ impl ClientShellState {
                         }
                     }
                 }
-                RawInputEvent::Mouse(mouse) => self.handle_mouse(mouse, &mut outcome),
+                RawInputEvent::Mouse(mouse) => {
+                    self.handle_mouse(mouse, &mut outcome);
+                    self.update_host_mouse_shape(mouse, &mut outcome);
+                }
                 RawInputEvent::OuterFocusGained => {
                     self.outer_focused = Some(true);
                     outcome.query_host_appearance = true;
@@ -242,6 +253,14 @@ impl ClientShellState {
                 }
                 RawInputEvent::OuterFocusLost => {
                     self.outer_focused = Some(false);
+                    // A release outside the host window may never reach us.
+                    // Cancel locally, without moving focus in another client.
+                    self.chrome_drag = None;
+                    self.tab_press = None;
+                    self.agent_press = None;
+                    self.workspace_press = None;
+                    self.hovered_pane_label_id = None;
+                    outcome.repaint = true;
                     self.release_input_leases(&mut outcome);
                     outcome
                         .requests
@@ -482,6 +501,9 @@ impl ClientShellState {
     ) -> Option<ClientInputTarget> {
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
+            return None;
+        }
+        if key.code == KeyCode::Esc && self.cancel_chrome_drag(outcome) {
             return None;
         }
         if matches!(

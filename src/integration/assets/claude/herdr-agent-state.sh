@@ -54,8 +54,6 @@ hook_event_name = str(hook_input.get("hook_event_name") or "")
 if hook_event_name != "SessionStart":
     raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
-if is_subagent:
-    raise SystemExit(0)
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
@@ -65,6 +63,31 @@ agent_session_path = transcript_path if isinstance(transcript_path, str) and tra
 session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
 if not isinstance(session_start_source, str) or not session_start_source:
     session_start_source = None
+if is_subagent:
+    subagent_id = str(hook_input.get("agent_id") or "").strip()
+    if not subagent_id:
+        raise SystemExit(0)
+    subagent_type = str(hook_input.get("agent_type") or "subagent").strip() or "subagent"
+    request = {
+        "id": request_id,
+        "method": "pane.report_metadata",
+        "params": {
+            "pane_id": pane_id,
+            "source": source + ":subagent",
+            "tokens": {"__claude_sa:" + subagent_id[:20]: subagent_type + " " + subagent_id},
+            "seq": report_seq,
+            "ttl_ms": 300000,
+        },
+    }
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        client.close()
+    except Exception:
+        pass
+    raise SystemExit(0)
 if agent_session_id:
     params = {
         "pane_id": pane_id,

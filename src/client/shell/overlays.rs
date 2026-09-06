@@ -3,6 +3,100 @@ use super::*;
 mod settings_overlay;
 mod worktree_overlays;
 
+pub(crate) fn render_sleep_overlay(
+    buffer: &mut Buffer,
+    server: &str,
+    phase: usize,
+    remaining: u64,
+    phrase: &str,
+    snapshot: &ClientShellSnapshot,
+    palette: &Palette,
+) {
+    let Some(area) = popup(buffer.area, 76, 12) else {
+        return;
+    };
+    for cell in &mut buffer.content {
+        cell.set_style(cell.style().add_modifier(Modifier::DIM));
+    }
+    let Some(inner) = panel(buffer, area, palette.accent, palette.panel_bg) else {
+        return;
+    };
+    let normal = Style::default().fg(palette.text).bg(palette.panel_bg);
+    // Four dots per frame, rotating within a single terminal cell.
+    let spinner = ["⠏", "⠹", "⠼", "⠧"];
+    let controls = format!("Closing in {remaining}s · esc to cancel");
+    let controls_width = display_width(&controls).min(inner.width);
+    let controls_x = inner.right().saturating_sub(controls_width);
+    put_text(
+        buffer,
+        inner.x,
+        inner.y,
+        controls_x.saturating_sub(inner.x).saturating_sub(1),
+        &format!(" {} Continuing work on…", spinner[phase % 4]),
+        normal.add_modifier(Modifier::BOLD),
+    );
+    put_text(
+        buffer,
+        controls_x,
+        inner.y,
+        controls_width,
+        &controls,
+        normal.fg(palette.accent),
+    );
+    let details = [
+        server.to_owned(),
+        format!(
+            "{} spaces · {} panes · {} agents",
+            snapshot.workspaces.len(),
+            snapshot.panes.len(),
+            snapshot.agents.len()
+        ),
+    ];
+    for (index, text) in details.iter().enumerate() {
+        if inner.height <= index as u16 + 1 {
+            break;
+        }
+        put_text(
+            buffer,
+            inner.x + 3,
+            inner.y + 1 + index as u16,
+            inner.width.saturating_sub(3),
+            text,
+            normal,
+        );
+    }
+    let lines = [
+        (
+            "Closing this window only. Server processes stay running.".to_owned(),
+            normal,
+        ),
+        (
+            "Local work requires this Mac to stay awake.".to_owned(),
+            normal.fg(palette.overlay1),
+        ),
+        (String::new(), normal),
+        (
+            phrase.to_owned(),
+            normal.fg(palette.overlay1).add_modifier(Modifier::ITALIC),
+        ),
+    ];
+    for (index, (text, style)) in lines
+        .iter()
+        .take(inner.height.saturating_sub(4) as usize)
+        .enumerate()
+    {
+        let width = display_width(text).min(inner.width);
+        put_text(
+            buffer,
+            inner.x + (inner.width - width) / 2,
+            inner.y + 4 + index as u16,
+            width,
+            text,
+            *style,
+        );
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct OverlayRender {
     pub(crate) primary: Rect,
@@ -103,7 +197,13 @@ pub(crate) fn render_global_menu(
         .right()
         .saturating_sub(width)
         .min(screen.right().saturating_sub(width));
-    let y = launcher.y.saturating_sub(height).max(screen.y);
+    let y = if launcher.y.saturating_sub(screen.y) >= height {
+        launcher.y - height
+    } else {
+        launcher
+            .bottom()
+            .min(screen.bottom().saturating_sub(height))
+    };
     let inner = panel(
         buffer,
         Rect::new(x, y, width, height),

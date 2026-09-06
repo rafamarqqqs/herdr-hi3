@@ -33,6 +33,7 @@ impl ClientShellState {
         let mut collapsed_groups = self.collapsed_groups.iter().cloned().collect::<Vec<_>>();
         collapsed_groups.sort();
         let preferences = preferences::ClientChromePreferences {
+            sleep_seconds: Some(self.sleep_seconds),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual
@@ -96,6 +97,11 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            top_padding: std::env::var("HERDR_CLIENT_TOP_PADDING")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(0)
+                .min(4),
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,
@@ -308,7 +314,12 @@ impl ClientShellConfig {
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
-                self.agent_panel_sort = ui.agent_panel_sort;
+                self.agent_panel_sort = match ui.agent_panel_sort {
+                    crate::config::AgentPanelSortConfig::Tree => {
+                        crate::config::AgentPanelSortConfig::Spaces
+                    }
+                    other => other,
+                };
                 self.status_indicators = ui.status_indicators;
                 self.sound_enabled = ui.sound.enabled;
                 self.toast_delivery = ui.toast.delivery;
@@ -348,19 +359,32 @@ impl ClientShellConfig {
         tab_count: usize,
         sidebar_width: u16,
     ) -> ClientShellLayout {
+        let top_padding = self.top_padding.min(rows.saturating_sub(1));
+        let content_rows = rows.saturating_sub(top_padding);
         if cols <= self.mobile_width_threshold {
-            let header_height = rows.min(2);
+            let header_height = content_rows.min(2);
             return ClientShellLayout {
                 sidebar: Rect::default(),
                 tab_bar: Rect::default(),
-                mobile_header: Rect::new(0, 0, cols, header_height),
-                pane_surface: Rect::new(0, header_height, cols, rows.saturating_sub(header_height)),
+                mobile_header: Rect::new(0, top_padding, cols, header_height),
+                pane_surface: Rect::new(
+                    0,
+                    top_padding.saturating_add(header_height),
+                    cols,
+                    content_rows.saturating_sub(header_height),
+                ),
             };
         }
 
         let sidebar_width = if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
-                SidebarCollapsedModeConfig::Compact => 4,
+                SidebarCollapsedModeConfig::Compact => {
+                    if self.top_padding > 0 {
+                        6
+                    } else {
+                        4
+                    }
+                }
                 SidebarCollapsedModeConfig::Hidden => 0,
             }
         } else {
@@ -372,32 +396,43 @@ impl ClientShellConfig {
             sidebar_width.clamp(min, max)
         }
         .min(cols.saturating_sub(1));
-        let main = Rect::new(sidebar_width, 0, cols.saturating_sub(sidebar_width), rows);
-        let show_tab_bar = rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
+        let main = Rect::new(
+            sidebar_width,
+            top_padding,
+            cols.saturating_sub(sidebar_width),
+            content_rows,
+        );
+        let show_tab_bar =
+            content_rows > 1 && !(self.hide_tab_bar_when_single_tab && tab_count == 1);
         let tab_height = u16::from(show_tab_bar);
         let (tab_bar, pane_surface) = match self.tab_bar_position {
             TabBarPositionConfig::Top => (
-                Rect::new(main.x, 0, main.width, tab_height),
+                Rect::new(main.x, top_padding, main.width, tab_height),
                 Rect::new(
                     main.x,
-                    tab_height,
+                    top_padding.saturating_add(tab_height),
                     main.width,
-                    rows.saturating_sub(tab_height),
+                    content_rows.saturating_sub(tab_height),
                 ),
             ),
             TabBarPositionConfig::Bottom => (
                 Rect::new(
                     main.x,
-                    rows.saturating_sub(tab_height),
+                    top_padding.saturating_add(content_rows.saturating_sub(tab_height)),
                     main.width,
                     tab_height,
                 ),
-                Rect::new(main.x, 0, main.width, rows.saturating_sub(tab_height)),
+                Rect::new(
+                    main.x,
+                    top_padding,
+                    main.width,
+                    content_rows.saturating_sub(tab_height),
+                ),
             ),
         };
 
         ClientShellLayout {
-            sidebar: Rect::new(0, 0, sidebar_width, rows),
+            sidebar: Rect::new(0, top_padding, sidebar_width, content_rows),
             tab_bar,
             mobile_header: Rect::default(),
             pane_surface,
@@ -432,6 +467,18 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+
+    #[test]
+    fn app_top_padding_offsets_desktop_chrome_and_surface() {
+        let mut shell = ClientShellConfig::from_config(&Config::default());
+        shell.top_padding = 1;
+
+        let layout = shell.layout(106, 30, false, 2, 30);
+
+        assert_eq!(layout.sidebar, Rect::new(0, 1, 30, 29));
+        assert_eq!(layout.tab_bar, Rect::new(30, 1, 76, 1));
+        assert_eq!(layout.pane_surface, Rect::new(30, 2, 76, 28));
+    }
 
     #[test]
     fn live_reload_applies_client_owned_sections() {

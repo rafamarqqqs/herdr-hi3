@@ -498,6 +498,32 @@ impl Tab {
         Ok(pane_id)
     }
 
+    pub(crate) fn insert_existing_tab(
+        &mut self,
+        target_pane_id: PaneId,
+        mut moved: Tab,
+        direction: Direction,
+        moved_first: bool,
+        ratio: f32,
+        focus: bool,
+    ) -> Result<PaneId, Box<Tab>> {
+        let Some(focused_pane_id) = self.layout.insert_layout_near(
+            target_pane_id,
+            &mut moved.layout,
+            direction,
+            moved_first,
+            ratio,
+            focus,
+        ) else {
+            return Err(Box::new(moved));
+        };
+        self.panes.extend(moved.panes);
+        #[cfg(test)]
+        self.runtimes.extend(moved.runtimes);
+        self.zoomed = false;
+        Ok(focused_pane_id)
+    }
+
     fn detach_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         if self.layout.pane_count() <= 1 {
             return None;

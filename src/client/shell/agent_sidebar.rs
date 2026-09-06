@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     buffer::Buffer,
@@ -11,10 +11,23 @@ use ratatui::{
 use super::*;
 
 struct AgentRow {
-    pane_id: String,
+    target: AgentRowTarget,
     status: crate::api::schema::AgentStatus,
     focused: bool,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    tree: Option<AgentTreeLine>,
+}
+
+enum AgentRowTarget {
+    Pane(String),
+    Group(String),
+}
+
+struct AgentTreeLine {
+    branch: String,
+    expanded: Option<bool>,
+    label: String,
+    trailing: String,
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -29,12 +42,18 @@ pub(super) fn ordered_agent_pane_ids(
                 snapshot
                     .agents
                     .iter()
-                    .any(|agent| agent.pane_id == pane_id.as_str())
+                    .any(|agent| {
+                        agent.pane_id == pane_id.as_str() && is_real_agent(agent)
+                    })
             })
             .cloned()
             .collect();
     }
-    let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+    let mut agents = snapshot
+        .agents
+        .iter()
+        .filter(|agent| is_real_agent(agent))
+        .collect::<Vec<_>>();
     if sort == crate::config::AgentPanelSortConfig::Priority {
         agents.sort_by_key(|agent| {
             (
@@ -55,6 +74,7 @@ pub(super) fn render_agent_panel(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    collapsed_groups: &HashSet<String>,
     hits: &mut ShellHitMap,
 ) {
     if area.height == 0 {
@@ -88,8 +108,10 @@ pub(super) fn render_agent_panel(
             .unwrap_or(match config.agent_panel_sort {
                 crate::config::AgentPanelSortConfig::Spaces => "grouped",
                 crate::config::AgentPanelSortConfig::Priority => "priority",
+                crate::config::AgentPanelSortConfig::Tree => "tree",
             });
-    let sort_width = display_width(sort_label).min(area.width as usize) as u16;
+    let sort_label = sort_label.to_owned();
+    let sort_width = display_width(&sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
         area.right().saturating_sub(sort_width),
         area.y + 1,
@@ -106,7 +128,7 @@ pub(super) fn render_agent_panel(
         sort_rect.x,
         sort_rect.y,
         sort_rect.width,
-        sort_label,
+        &sort_label,
         Style::default()
             .fg(if snapshot.agent_view_label.is_some() {
                 config.palette.accent
@@ -116,7 +138,7 @@ pub(super) fn render_agent_panel(
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows = agent_rows(snapshot, config);
+    let rows = agent_rows(snapshot, config, collapsed_groups);
     let body = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -172,7 +194,14 @@ pub(super) fn render_agent_panel(
             break;
         }
         let rect = Rect::new(body.x, y, content_width, height);
-        hits.agents.push((rect, row.pane_id.clone()));
+        match &row.target {
+            AgentRowTarget::Pane(pane_id) => hits.agents.push((rect, pane_id.clone())),
+            AgentRowTarget::Group(key) => hits.agent_groups.push(AgentGroupHit {
+                rect,
+                key: key.clone(),
+                focused: row.focused,
+            }),
+        }
         render_agent_row(buffer, rect, row, config);
         y = y
             .saturating_add(height)
@@ -190,7 +219,17 @@ pub(super) fn render_agent_panel(
     }
 }
 
-fn agent_rows(snapshot: &ClientShellSnapshot, config: &ClientShellConfig) -> Vec<AgentRow> {
+fn agent_rows(
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    collapsed_groups: &HashSet<String>,
+) -> Vec<AgentRow> {
+    if config.agent_panel_sort == crate::config::AgentPanelSortConfig::Tree
+        && snapshot.agent_view_label.is_none()
+    {
+        return tree_agent_rows(snapshot, collapsed_groups);
+    }
+
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .filter_map(|pane_id| {
@@ -198,68 +237,213 @@ fn agent_rows(snapshot: &ClientShellSnapshot, config: &ClientShellConfig) -> Vec
                 .agents
                 .iter()
                 .find(|agent| agent.pane_id == pane_id)?;
-            let workspace = snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
-            let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
-            let pane = snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == agent.pane_id);
-            let tab_count = snapshot
-                .tabs
-                .iter()
-                .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-                .count();
-            let tab_label = tab
-                .filter(|tab| tab_count > 1 || tab.custom_label)
-                .map(|tab| tab.label.as_str());
-            let agent_label = agent
-                .display_agent
-                .as_deref()
-                .or(agent.name.as_deref())
-                .or(agent.agent.as_deref())
-                .or(agent.title.as_deref());
-            let labels = agent
-                .state_labels
-                .iter()
-                .cloned()
-                .collect::<HashMap<_, _>>();
-            let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
-            let state_text = labels
-                .get(status_text(agent.agent_status))
-                .map(String::as_str)
-                .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
-            let canonical_agent = agent
-                .agent
-                .as_deref()
-                .and_then(crate::detect::parse_agent_label);
-            let rows = crate::ui::sidebar_agent_rows(
-                &config.agents,
-                crate::ui::AgentTokenContext {
-                    workspace: &workspace.label,
-                    tab: tab_label,
-                    pane: agent
-                        .title
-                        .as_deref()
-                        .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
-                    agent_label,
-                    terminal_title: agent.terminal_title.as_deref(),
-                    terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
-                    canonical_agent,
-                    tokens: &tokens,
-                },
-                state_text,
-            );
-            Some(AgentRow {
-                pane_id: agent.pane_id.clone(),
-                status: agent.agent_status,
-                focused: agent.focused,
-                rows,
-            })
+            configured_agent_row(snapshot, config, agent)
         })
         .collect()
+}
+
+fn configured_agent_row(
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    agent: &crate::protocol::ClientShellAgent,
+) -> Option<AgentRow> {
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
+    let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == agent.pane_id);
+    let tab_count = snapshot
+        .tabs
+        .iter()
+        .filter(|candidate| candidate.workspace_id == agent.workspace_id)
+        .count();
+    let tab_label = tab
+        .filter(|tab| tab_count > 1 || tab.custom_label)
+        .map(|tab| tab.label.as_str());
+    let agent_label = agent
+        .name
+        .as_deref()
+        .or(agent.display_agent.as_deref())
+        .or(agent.agent.as_deref())
+        .or(agent.title.as_deref());
+    let labels = agent
+        .state_labels
+        .iter()
+        .cloned()
+        .collect::<HashMap<_, _>>();
+    let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
+    let state_text = labels
+        .get(status_text(agent.agent_status))
+        .map(String::as_str)
+        .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
+    let canonical_agent = agent
+        .agent
+        .as_deref()
+        .and_then(crate::detect::parse_agent_label);
+    let rows = crate::ui::sidebar_agent_rows(
+        &config.agents,
+        crate::ui::AgentTokenContext {
+            workspace: &workspace.label,
+            tab: tab_label,
+            pane: agent
+                .title
+                .as_deref()
+                .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
+            agent_label,
+            terminal_title: agent.terminal_title.as_deref(),
+            terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
+            canonical_agent,
+            tokens: &tokens,
+        },
+        state_text,
+    );
+    Some(AgentRow {
+        target: AgentRowTarget::Pane(agent.pane_id.clone()),
+        status: agent.agent_status,
+        focused: agent.focused,
+        rows,
+        tree: None,
+    })
+}
+
+fn tree_agent_rows(
+    snapshot: &ClientShellSnapshot,
+    collapsed_groups: &HashSet<String>,
+) -> Vec<AgentRow> {
+    let mut rows = Vec::new();
+    for workspace in &snapshot.workspaces {
+        let agents = snapshot
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.workspace_id == workspace.workspace_id
+                    && is_visible_tree_agent(agent)
+            })
+            .collect::<Vec<_>>();
+        if agents.is_empty() {
+            continue;
+        }
+        let workspace_key = format!("agent-tree:space:{}", workspace.workspace_id);
+        let workspace_expanded = !collapsed_groups.contains(&workspace_key);
+        let workspace_status = aggregate_status(agents.iter().map(|agent| agent.agent_status));
+        rows.push(AgentRow {
+            target: AgentRowTarget::Group(workspace_key),
+            status: workspace_status,
+            focused: workspace.focused,
+            rows: Vec::new(),
+            tree: Some(AgentTreeLine {
+                branch: String::new(),
+                expanded: Some(workspace_expanded),
+                label: workspace.label.clone(),
+                trailing: count_label(agents.len(), "agent", "agents"),
+            }),
+        });
+        if !workspace_expanded {
+            continue;
+        }
+
+        // The focused agent is the Space's coordinator. Other agents in that
+        // Space are rendered as its children, which gives the sidebar a useful
+        // agent → subagent shape without exposing tabs or panes. Keep finished
+        // agents here while their pane/session is still open so the Space and
+        // tree do not disappear unexpectedly. Every agent gets a connector,
+        // including a lone coordinator, so the tree remains connected.
+        let mut agents = agents;
+        agents.sort_by_key(|agent| (!agent.focused, agent.state_change_seq));
+        let agent_count = agents.len();
+        for (index, agent) in agents.into_iter().enumerate() {
+            let label = compact_agent_name(agent);
+            let branch = if index + 1 == agent_count {
+                "  └─ ".to_owned()
+            } else {
+                "  ├─ ".to_owned()
+            };
+            rows.push(AgentRow {
+                target: AgentRowTarget::Pane(agent.pane_id.clone()),
+                status: agent.agent_status,
+                focused: agent.focused,
+                rows: Vec::new(),
+                tree: Some(AgentTreeLine {
+                    branch,
+                    expanded: None,
+                    label,
+                    trailing: sidebar_status_text(agent.agent_status).to_owned(),
+                }),
+            });
+            let subagents = agent
+                .tokens
+                .iter()
+                .filter_map(|(key, value)| key.strip_prefix("__claude_sa:").map(|_| value))
+                .collect::<Vec<_>>();
+            for (sub_index, kind) in subagents.iter().enumerate() {
+                rows.push(AgentRow {
+                    target: AgentRowTarget::Pane(agent.pane_id.clone()),
+                    status: crate::api::schema::AgentStatus::Working,
+                    focused: false,
+                    rows: Vec::new(),
+                    tree: Some(AgentTreeLine {
+                        branch: if sub_index + 1 == subagents.len() {
+                            "  └─ ".to_owned()
+                        } else {
+                            "  ├─ ".to_owned()
+                        },
+                        expanded: None,
+                        label: kind.to_string(),
+                        trailing: "subagent".to_owned(),
+                    }),
+                });
+            }
+        }
+    }
+    rows
+}
+
+fn aggregate_status(
+    statuses: impl Iterator<Item = crate::api::schema::AgentStatus>,
+) -> crate::api::schema::AgentStatus {
+    statuses
+        .max_by_key(|status| status_priority(*status))
+        .unwrap_or(crate::api::schema::AgentStatus::Idle)
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+fn compact_agent_name(agent: &crate::protocol::ClientShellAgent) -> String {
+    agent
+        .name
+        .as_deref()
+        .or(agent.display_agent.as_deref())
+        .or(agent.agent.as_deref())
+        .or(agent.title.as_deref())
+        .unwrap_or("agent")
+        .to_owned()
+}
+
+fn is_transient_shell(agent: &crate::protocol::ClientShellAgent) -> bool {
+    agent
+        .tokens
+        .iter()
+        .any(|(key, value)| key == "__herdr_tree_shell" && value == "1")
+}
+
+fn is_real_agent(agent: &crate::protocol::ClientShellAgent) -> bool {
+    !is_transient_shell(agent)
+        && (agent.agent.is_some() || agent.display_agent.is_some())
+}
+
+fn is_visible_tree_agent(agent: &crate::protocol::ClientShellAgent) -> bool {
+    // A real agent can briefly inherit the transient-shell marker while its
+    // lifecycle hook is being refreshed. Keep it in the Space tree whenever
+    // Herdr still identifies an agent, while hiding plain directory shells.
+    !is_transient_shell(agent)
+        || agent.agent.is_some()
+        || agent.display_agent.is_some()
 }
 
 fn render_agent_row(buffer: &mut Buffer, rect: Rect, row: &AgentRow, config: &ClientShellConfig) {
@@ -292,6 +476,58 @@ fn render_agent_row(buffer: &mut Buffer, rect: Rect, row: &AgentRow, config: &Cl
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),
     );
+    buffer.set_style(rect, row_style);
+    if row.focused && rect.width > 0 {
+        put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            1,
+            "▌",
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.active_row_bg),
+        );
+    }
+    if let Some(tree) = &row.tree {
+        let content = Rect::new(
+            rect.x.saturating_add(1),
+            rect.y,
+            rect.width.saturating_sub(1),
+            1,
+        );
+        let trailing_width = display_width(&tree.trailing).min(content.width as usize) as u16;
+        let left_width = content
+            .width
+            .saturating_sub(trailing_width)
+            .saturating_sub(u16::from(trailing_width > 0));
+        let mut spans = vec![ratatui::text::Span::styled(tree.branch.as_str(), secondary)];
+        if let Some(expanded) = tree.expanded {
+            spans.push(ratatui::text::Span::styled(
+                if expanded { "▾ " } else { "▸ " },
+                Style::default().fg(palette.accent),
+            ));
+        }
+        spans.extend([
+            ratatui::text::Span::styled(icon.0, icon.1),
+            ratatui::text::Span::raw(" "),
+            ratatui::text::Span::styled(tree.label.as_str(), name_style),
+        ]);
+        Paragraph::new(Line::from(spans))
+            .style(row_style)
+            .render(Rect::new(content.x, content.y, left_width, 1), buffer);
+        if trailing_width > 0 {
+            put_text(
+                buffer,
+                content.right().saturating_sub(trailing_width),
+                content.y,
+                trailing_width,
+                &tree.trailing,
+                secondary,
+            );
+        }
+        return;
+    }
     let rows = if row.rows.is_empty() {
         vec![vec![crate::ui::ResolvedToken {
             kind: crate::ui::ResolvedTokenKind::StateIcon,

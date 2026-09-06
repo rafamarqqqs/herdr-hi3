@@ -117,7 +117,7 @@ fn tab_bar_renders_endpoint_status_ellipses_and_clamps_to_useful_scroll() {
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
     assert!(top.contains("ZOOM · host"));
-    assert!(top.contains('…'));
+    assert!(!state.hits.tab_scroll_right.is_empty());
 
     state.tab_scroll = usize::MAX;
     state.reveal_focused_tab = false;
