@@ -1,8 +1,8 @@
 # Cross-platform desktop direction
 
-Target: an Electron client for Windows, Linux and macOS, backed by the Herdr
-runtime. The macOS/Ghostty preview is the current working implementation and
-remains supported during exploration.
+Target: hi3, a Tauri client backed by the Herdr runtime. The first MVP targets
+macOS; Windows and Linux remain later goals. The existing macOS/Ghostty app and
+official terminal installation are preserved independently, not migrated in place.
 
 1. Inventory the existing negotiated JSON/API capabilities and identify missing
    terminal-streaming, resize, input and lifecycle contracts. Do not couple the
@@ -14,9 +14,18 @@ remains supported during exploration.
 4. Add platform packaging, updates, permissions and signing after the core client
    contract is demonstrated on all three target systems.
 
-Security boundaries: sandboxed renderer, context isolation, no renderer Node.js
-integration, narrow validated IPC, and no remote content with privileged access.
+Security requirements: narrowly scoped Tauri capabilities, validated IPC,
+untrusted terminal content, and no remote content with privileged access.
 Keep authentication, credentials and process control out of untrusted UI content.
 
-This roadmap does not introduce Electron dependencies, implement a terminal
-renderer, or promise feature parity or a release timeline.
+Before running a prototype, establish distinct app identity, build outputs,
+configuration, state and test sockets. Never reuse the existing default server
+or silently fall back to it. The Herdr server must survive GUI detachment.
+
+The first prototype now lives in `../desktop/`: Tauri, vanilla JavaScript and
+xterm, using the public terminal-session controller and an isolated Herdr server.
+It implements one terminal, bounded input/output, semantic paste, resize and
+reconnect. Unit tests and an isolated real-server lifecycle test cover the first
+slice; native visual/clipboard/IME QA remains necessary. This is not feature parity
+with the Ghostty app. Existing Ghostty packaging scripts are retained but are not
+hi3 build instructions. See `../desktop/README.md` for build and isolation details.

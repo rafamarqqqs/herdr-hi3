@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hi3</title><link rel="stylesheet" href="./main.css"></head>
+<body><div id="app">
+<aside id="sidebar">
+<nav class="toolbar" aria-label="Actions"><button id="menu">menu</button><button id="new-space">new</button></nav>
+<div class="section-heading"><span class="expanded-label">spaces</span><button id="collapse" aria-label="Collapse sidebar" aria-expanded="true">«</button></div>
+<div id="spaces" class="rows" aria-label="Spaces"></div>
+<div class="section-heading agents-heading"><span class="expanded-label">agents</span><span class="expanded-label">grouped</span></div><div id="agents" class="rows" aria-label="Agents"></div>
+<div class="sidebar-bottom"><span id="status" role="status">Connecting…</span><div id="interaction-mode" role="status"></div></div>
+</aside>
+<main><nav id="tabs" aria-label="Tabs"></nav>
+<div id="panes" aria-label="Terminal panes"></div>
+<div id="error" role="alert" hidden></div></main>
+</div>
+<dialog id="menu-dialog"><button id="settings">settings</button><button id="keybinds">keybinds</button><button id="reconnect">reconnect terminals</button><button id="demo-toggle">agent states demo</button><p id="build-info">hi3 · i3-preview-01</p><p id="location"></p></dialog>
+<dialog id="keybinds-dialog"><form method="dialog"><div class="dialog-title">pane keybinds<button aria-label="Close keybinds">×</button></div></form><p>Mod = ⌘⌥ (Command + Option). Only inside hi3.</p><dl><dt>Mod + arrows / J K L ;</dt><dd>Focus left / down / up / right.</dd><dt>Mod + Shift + direction</dt><dd>Move beside the neighboring pane.</dd><dt>Mod + H / V</dt><dd>Choose the next split: side by side / stacked.</dd><dt>Mod + Enter</dt><dd>Create a pane using the chosen direction.</dd><dt>Mod + F</dt><dd>Toggle pane zoom (not macOS fullscreen).</dd><dt>Mod + R</dt><dd>Resize mode: arrows adjust by 5%; Esc/Enter exits.</dd></dl><p>No close/kill shortcut. Demo supports focus and zoom; mutations require returning to the test server. Parent containers, stacking and tabbed layouts are not implemented yet.</p></dialog>
+<dialog id="settings-dialog"><form method="dialog"><div class="dialog-title">settings<button aria-label="Close settings">×</button></div></form><label>Terminal font size <input id="font-size" type="range" min="11" max="20" value="13"><output id="font-value">13 px</output></label><p>Theme: Gruvbox · app-local only</p></dialog>
+<script type="module" src="./main.js"></script></body></html>

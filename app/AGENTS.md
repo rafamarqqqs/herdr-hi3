@@ -10,5 +10,10 @@ desktop packaging, launcher resources and upstream-update tooling.
 - Follow the upstream code's test and protocol rules. Do not submit this fork's changes upstream without authorization.
 - Do not add coauthor or AI-attribution trailers to commits.
 
-Electron is a future client target, not an implemented dependency or supported
-runtime in this preview. See `ROADMAP.md` before proposing cross-platform work.
+hi3 is the new Tauri client in `../desktop/`, starting with a one-terminal macOS
+prototype. The scripts in this directory still package the inherited Ghostty app;
+do not run them as hi3 build/install commands. See `ROADMAP.md`.
+
+Keep hi3 app identity, build outputs, configuration, state and test sockets
+distinct from existing Herdr installations. Never connect tests to an inherited
+default server or install over an existing app. Do not bundle personal data.

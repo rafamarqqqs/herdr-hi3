@@ -1,0 +1,9 @@
+/node_modules/
+/dist/
+/build/
+/src-tauri/target/
+/src-tauri/gen/
+/src-tauri/runtime/
+/src-tauri/icons/*
+!/src-tauri/icons/icon.png
+!/src-tauri/icons/icon.icns
