@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **This fork is abandoned.** Use the official [herdr-app](https://github.com/herdrdev/herdr-app) instead.
+>
+> `herdr-hi3` is a fork of [herdrdev/herdr](https://github.com/herdrdev/herdr) that adds an independent desktop prototype and custom runtime changes; see [desktop/README.md](desktop/README.md). It keeps the upstream history and the [Apache-2.0 license](LICENSE), and it receives no updates.
+
 # herdr
 
 
